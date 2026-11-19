@@ -116,20 +116,33 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--well); pad
 .chip.warn { color: var(--review); background: var(--review-bg); border-color: transparent; }
 
 /* ---- input ---- */
-.tabs { position: relative; display: inline-grid; grid-template-columns: 1fr 1fr; padding: 4px; margin-bottom: 14px; background: var(--well); border-radius: 14px; }
-.tabs::before {
-  content: ""; position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / 2);
-  background: var(--card); border-radius: 10px; box-shadow: 0 1px 3px rgba(41, 37, 36, 0.12);
-  transition: transform 0.22s ease;
+.sec { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 6px; }
+.sec2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.target { margin: 0 0 16px; }
+.filters { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; margin-bottom: 16px; }
+.f-wide { grid-column: 1 / -1; }
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+fieldset:disabled { opacity: 0.55; }
+legend, .field > label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 6px; padding: 0; }
+.field { display: block; }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill { position: relative; cursor: pointer; }
+.pill input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.pill span {
+  display: inline-block; font-size: 13.5px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line-strong);
+  background: var(--card); color: var(--ink); transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.12s;
 }
-.tabs[data-active="discover"]::before { transform: translateX(100%); }
-.tab {
-  position: relative; z-index: 1; white-space: nowrap;
-  border: 0; background: transparent; color: var(--muted); padding: 8px 16px; border-radius: 10px;
-  cursor: pointer; font: 500 14px var(--sans); transition: background 0.15s, color 0.15s;
+.pill:hover span { background: var(--well); }
+.pill input:checked + span { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 500; }
+.pill input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pill input:disabled + span { cursor: not-allowed; }
+.pill:active span { transform: scale(0.97); }
+select {
+  width: 100%; font: 14px var(--sans); padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong); background: var(--bg); color: var(--ink); transition: border-color 0.15s, box-shadow 0.15s;
 }
-.tab:hover { color: var(--ink); }
-.tab[aria-selected="true"] { color: var(--ink); }
+select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.cands { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; animation: rise 0.22s ease-out both; }
 textarea, input[type="text"], input[type="password"] {
   width: 100%; font: 14px/1.55 var(--mono); padding: 12px 14px; border-radius: var(--radius-sm);
   border: 1px solid var(--line-strong); background: var(--bg); color: var(--ink);
@@ -150,7 +163,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 4px 16px -2px rgba(59, 79, 2
 button.secondary { background: var(--card); color: var(--ink); border-color: var(--line-strong); }
 button.secondary:hover:not(:disabled) { background: var(--well); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-button:focus-visible, a:focus-visible, summary:focus-visible, .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .runbar { display: flex; flex-wrap: wrap; gap: 10px; margin: -4px 0 18px; }
 .err { color: var(--bad); background: var(--bad-bg); padding: 10px 14px; border-radius: var(--radius-sm); margin-top: 12px; font-size: 14px; }
 .cand { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
@@ -218,7 +231,8 @@ pre.mail {
   }
   .runbar button { flex: 1 1 0; min-height: 44px; }
   .sub { font-size: 15px; }
-  .grid2 { grid-template-columns: 1fr; }
+  .grid2, .filters { grid-template-columns: 1fr; }
+  .pill span { padding: 8px 12px; }
   table, thead, tbody, tr, th, td { display: block; }
   thead { display: none; }
   td { border: 0; padding: 2px 0; }
@@ -302,7 +316,6 @@ button.primary.busy::after {
 /* micro-interactions: gentle lift on hover, compression on press */
 button.secondary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--shadow); }
 button.primary:active:not(:disabled), button.secondary:active:not(:disabled) { transform: translateY(0) scale(0.98); transition-duration: 0.06s; }
-.tab:active { transform: scale(0.98); }
 
 /* reduced motion: turn all of it off (no pulse, no stagger, no shimmer, no sliding) */
 @media (prefers-reduced-motion: reduce) {

@@ -11,6 +11,9 @@ import { budgetedLLM, DemoLimitError, type LLM, type LlmRequest } from "../src/l
 import type { CompanyRecord } from "../src/lib/types";
 import { allowAttempt, allowDiscover, allowRun, gateRun, limits, publicAllowance } from "../src/lib/limits";
 import { discoverDomains } from "../src/lib/discover";
+import { DEFAULT_CRITERIA, discoveryPrompt, isDefault, parseCriteria, summarize, type Criteria } from "../src/lib/criteria";
+import { setStoreForTests } from "../src/lib/store";
+import { readFileSync } from "node:fs";
 import { open as unseal, seal } from "../src/lib/secrets";
 import { parseFacts } from "../src/lib/extract";
 import { assumesHeldCert, certBasis, validateDraft } from "../src/lib/draft";
@@ -460,8 +463,11 @@ async function main() {
     for (let i = 0; i < 4; i++) att.push(await allowAttempt(a, "process", "co-1", limits.processAttempts));
     check("per-company attempt cap (3)", att[2] && !att[3], JSON.stringify(att));
     const many = ["example.com", "example.org", "iana.org", "wikipedia.org", "github.com", "python.org", "nodejs.org"].map((x) => ({ domain: x, name: x, why: "t" }));
-    const found = await discoverDomains(undefined, async () => ({ candidates: many }));
+    const resolvesAll = async () => ({ address: "192.0.2.1" }); // no network: every candidate "resolves"
+    const found = await discoverDomains(undefined, async () => ({ candidates: many }), resolvesAll);
     check("discovery results capped at 5", found.length === limits.maxDiscoveryResults && found.length === 5, String(found.length));
+    const someDead = await discoverDomains(undefined, async () => ({ candidates: many }), async (h) => { if (h.endsWith(".org")) throw new Error("ENOTFOUND"); return {}; });
+    check("candidates whose domain does not resolve are dropped", someDead.length === 2 && someDead.every((c) => !c.domain.endsWith(".org")), someDead.map((c) => c.domain).join(","));
     check("domain cap per run is 10", limits.maxDomainsPerRun === 10);
   }
 
@@ -754,6 +760,77 @@ async function main() {
     check("Hunter month key is exempt from pruning", left.includes("hunter:m:2026-10=7"), left.join(","), true);
     const { rmSync } = await import("node:fs");
     rmSync(file, { force: true });
+  }
+
+  // 25. discovery search criteria: broader search, unchanged qualification
+  current = "25 discovery filters (search only, qualification unchanged)";
+  {
+    const d = parseCriteria(undefined);
+    check("no criteria = Sprinto's target as defaults", d.ok && isDefault(d.criteria) && d.criteria.stages.join() === "series_a,series_b,series_c" && d.criteria.headcount === "50-200" && d.criteria.model === "b2b_saas" && d.criteria.certStatus === "none_held" && d.criteria.certTypes.join() === "soc2,iso27001,gdpr", JSON.stringify(d));
+    const bad: [string, unknown][] = [
+      ["unknown stage", { stages: ["series_z"] }],
+      ["empty stage list", { stages: [] }],
+      ["stage not a list", { stages: "series_a" }],
+      ["unknown headcount", { headcount: "5-5000" }],
+      ["unknown model", { model: "crypto" }],
+      ["unknown cert status", { certStatus: "maybe" }],
+      ["unknown cert type", { certTypes: ["hipaa"] }],
+      ["no cert types while status is set", { certStatus: "none_held", certTypes: [] }],
+      ["non-text guidance", { note: 42 }],
+      ["criteria not an object", ["series_a"]],
+      ["prototype key", { headcount: "toString" }],
+    ];
+    for (const [name, input] of bad) check(`invalid filter rejected: ${name}`, !parseCriteria(input).ok, JSON.stringify(parseCriteria(input)), true);
+    const anyStage = parseCriteria({ stages: ["seed", "any"], certStatus: "any", certTypes: [] });
+    check("'any' stage wins over other stages; no cert types needed when status is any", anyStage.ok && anyStage.criteria.stages.join() === "any", JSON.stringify(anyStage));
+    const longNote = parseCriteria({ note: `fintech\n${"x".repeat(400)}` });
+    check("guidance is trimmed to 300 chars with control characters removed", longNote.ok && longNote.criteria.note.length === 300 && !/\n/.test(longNote.criteria.note));
+
+    const prompts: string[] = [];
+    const capture: LLM = async (req) => { prompts.push(req.prompt); return { candidates: [] }; };
+    const resolves = async () => ({});
+    await discoverDomains(DEFAULT_CRITERIA, capture, resolves);
+    const wide = parseCriteria({ stages: ["pre_seed", "seed"], headcount: "1-10", model: "marketplace", certStatus: "held", certTypes: ["iso27001"], note: "healthtech in Germany" });
+    await discoverDomains((wide as { criteria: Criteria }).criteria, capture, resolves);
+    check("default prompt asks for Series A/B/C, 50 to 200, B2B SaaS, none of SOC 2/ISO 27001/GDPR held", /Series A or Series B or Series C/.test(prompts[0]) && /50 to 200/.test(prompts[0]) && /B2B SaaS/.test(prompts[0]) && /does NOT publicly hold SOC 2 or ISO 27001 or GDPR/.test(prompts[0]), prompts[0]);
+    check("changed filters change the prompt (stage, size, model, certs, guidance)", /Pre-seed or Seed/.test(prompts[1]) && /1 to 10/.test(prompts[1]) && /Marketplace/.test(prompts[1]) && /publicly holds at least one of ISO 27001/.test(prompts[1]) && /healthtech in Germany/.test(prompts[1]) && !/Series A/.test(prompts[1]), prompts[1]);
+    check("summary line names the active criteria", summarize((wide as { criteria: Criteria }).criteria) === 'Pre-seed, Seed · 1 to 10 employees · Marketplace · Holds ISO 27001 · "healthtech in Germany"', summarize((wide as { criteria: Criteria }).criteria));
+    const noResults = await discoverDomains(DEFAULT_CRITERIA, async () => ({ candidates: [] }), resolves);
+    const garbage = await discoverDomains(DEFAULT_CRITERIA, async () => ({ nope: true }), resolves);
+    check("empty or malformed model output gives an empty list (no crash)", noResults.length === 0 && garbage.length === 0);
+
+    // route level: validation happens before the rate limit and before any model call
+    const st = new MemoryStore();
+    setStoreForTests(st);
+    const { POST: discoverPost } = await import("../src/app/api/discover/route");
+    const { POST: runsPost } = await import("../src/app/api/runs/route");
+    const jreq = (url: string, body: unknown) => new Request(url, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "198.51.100.7" }, body: JSON.stringify(body) });
+    const r400 = await discoverPost(jreq("http://t/api/discover", { criteria: { stages: ["series_z"] } }));
+    check("/api/discover answers 400 for an invalid filter and spends no discovery allowance", r400.status === 400 && /Unknown funding stage/.test((await r400.json()).error) && ![...st.counters.keys()].some((k) => k.startsWith("discover:")), [...st.counters.keys()].join(","), true);
+    const runBad = await runsPost(jreq("http://t/api/runs", { domains: ["preseedco.test | PreSeed Co"], mode: "discover", criteria: { model: "crypto" } }));
+    check("/api/runs answers 400 for invalid criteria and creates nothing", runBad.status === 400 && (await st.listRuns(10)).length === 0, String(runBad.status), true);
+    const preseed = parseCriteria({ stages: ["pre_seed"], headcount: "1-10" }) as { criteria: Criteria };
+    const runOk = await runsPost(jreq("http://t/api/runs", { domains: ["preseedco.test | PreSeed Co"], mode: "discover", send: false, criteria: preseed.criteria }));
+    const created = (await runOk.json()) as { run: { id: string; criteria?: Criteria }; companies: CompanyRecord[] };
+    const saved = await st.getRun(created.run.id);
+    check("a run saves the criteria it was searched with", runOk.status === 200 && saved?.criteria?.stages.join() === "pre_seed" && saved?.criteria?.headcount === "1-10", JSON.stringify(saved?.criteria));
+    setStoreForTests(null);
+
+    // the saved pre-seed run is processed with the normal pipeline: pre-seed is still outside the target
+    const P = "https://preseedco.test";
+    const w = world({ [P]: html("PreSeed Co", `<h1>PreSeed Co</h1><p>PreSeed Co is a B2B SaaS platform for HR teams. We just closed our pre-seed round.</p><p>Teams use it to run onboarding checklists, track time off and keep employee records in one place. It connects to payroll and calendar tools and sends reminders before deadlines.</p><p>${FILL} ${FILL}</p><p>${FILL} ${FILL}</p>`) });
+    const llm: LLM = async (req) => {
+      if (req.kind !== "extract") return {};
+      const o = baseExtract();
+      o.is_b2b_saas = { value: true, quote: "PreSeed Co is a B2B SaaS platform for HR teams", url: P } as never;
+      o.funding_stage = { value: "pre_seed", quote: "We just closed our pre-seed round", url: P } as never;
+      return o;
+    };
+    const comp = await st.getCompany(created.companies[0].id);
+    await processCompany(comp!, { fetcher: w.fetcher, llm, contacts: async () => ({ skip: "none" }), mailer: mailerFake(), store: st, now: () => new Date() });
+    check("a pre-seed company found by a pre-seed search is still Skip, not Fit", comp!.decision.result === "skip" && /outside the Series A-C target/.test(comp!.decision.reasons.join(" ")), `${comp!.decision.result} ${comp!.decision.reasons.join(" | ")}`, true);
+    const qsrc = readFileSync(new URL("../src/lib/qualify.ts", import.meta.url), "utf8");
+    check("qualification code does not read search criteria", !/criteria/i.test(qsrc.replace(/^\/\/.*$/gm, "")), "", true);
   }
 
   // utilities

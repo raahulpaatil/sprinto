@@ -1,18 +1,16 @@
-// Step 0 (optional): suggest candidate domains matching the ICP. Suggestions come from the model's memory,
-// are labelled unverified, and every one still goes through the full scrape/qualify pipeline.
+// Step 0: suggest candidate domains for the selected search criteria. Suggestions come from the model's memory,
+// are labelled unverified, and every one still goes through the full scrape/qualify pipeline against Sprinto's target.
 
 import dns from "node:dns/promises";
 import type { LLM } from "./gemini";
 import { normalizeDomain } from "./fetcher";
 import { limits } from "./limits";
-
-export const ICP_TEXT =
-  "B2B SaaS companies at Series A-C (roughly 50-200 employees) that sell to businesses and likely face SOC 2 / ISO 27001 / GDPR pressure from enterprise customers but do not publicly hold those certifications yet.";
+import { DEFAULT_CRITERIA, discoveryPrompt, type Criteria } from "./criteria";
 
 const SYSTEM = `You suggest real companies for a sales research list. Only suggest companies whose website domain you are confident exists.
-This is a memory-based suggestion list: it is NOT verified and may be out of date. Do not claim funding or headcount.
-Return ONLY JSON: {"candidates":[{"domain":"example.com","name":"Example","why":"one short reason it might fit the ICP"}]}
-Give at most 5 candidates. No duplicates. No big public companies.`;
+This is a memory-based suggestion list: it is NOT verified and may be out of date. Do not claim funding or headcount as fact.
+Return ONLY JSON: {"candidates":[{"domain":"example.com","name":"Example","why":"one short reason it might match the criteria"}]}
+Give at most 5 candidates. No duplicates. If nothing fits well, return fewer candidates rather than poor matches.`;
 
 export interface Candidate {
   domain: string;
@@ -20,9 +18,11 @@ export interface Candidate {
   why: string;
 }
 
-export async function discoverDomains(extra: string | undefined, llm: LLM): Promise<Candidate[]> {
-  const prompt = `ICP: ${ICP_TEXT}${extra?.trim() ? `\nExtra guidance from the user: ${extra.trim().slice(0, 300)}` : ""}`;
-  const raw = (await llm({ kind: "discover", system: SYSTEM, prompt, temperature: 0.7 })) as { candidates?: unknown };
+/** Resolves a hostname or throws. Injected so tests never depend on the network. */
+export type Lookup = (host: string) => Promise<unknown>;
+
+export async function discoverDomains(criteria: Criteria = DEFAULT_CRITERIA, llm: LLM, lookup: Lookup = (h) => dns.lookup(h)): Promise<Candidate[]> {
+  const raw = (await llm({ kind: "discover", system: SYSTEM, prompt: discoveryPrompt(criteria), temperature: 0.7 })) as { candidates?: unknown };
   const out: Candidate[] = [];
   const seen = new Set<string>();
   for (const c of Array.isArray(raw?.candidates) ? raw.candidates : []) {
@@ -30,7 +30,7 @@ export async function discoverDomains(extra: string | undefined, llm: LLM): Prom
     const d = typeof o.domain === "string" ? normalizeDomain(o.domain) : null;
     if (!d || seen.has(d)) continue;
     try {
-      await dns.lookup(d); // drop domains that do not resolve at all
+      await lookup(d); // drop domains that do not resolve at all
     } catch {
       continue;
     }

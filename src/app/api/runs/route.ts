@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
+import { parseCriteria } from "@/lib/criteria";
 import { normalizeDomain } from "@/lib/fetcher";
 import { clientIp, gateRun, MAX_DOMAINS_PER_RUN } from "@/lib/limits";
 import { newCompany, liveDeps, stripPageText } from "@/lib/pipeline";
@@ -25,7 +26,7 @@ function parseLines(input: unknown): { domain: string; name?: string; contactNam
 /** No sign-in. One shared set of limits (runs per IP per hour, shared daily company/AI/send budgets) protects the free-tier quotas. */
 export async function POST(req: Request) {
   const deps = liveDeps();
-  let body: { domains?: unknown; send?: unknown; mode?: unknown };
+  let body: { domains?: unknown; send?: unknown; mode?: unknown; criteria?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -36,12 +37,14 @@ export async function POST(req: Request) {
   if (parsed.length > MAX_DOMAINS_PER_RUN) {
     return NextResponse.json({ error: `Please keep it to ${MAX_DOMAINS_PER_RUN} domains per run (you sent ${parsed.length}).` }, { status: 400 });
   }
+  const crit = body.criteria === undefined ? null : parseCriteria(body.criteria);
+  if (crit && !crit.ok) return NextResponse.json({ error: crit.error }, { status: 400 });
   const gate = await gateRun(deps.store, { ip: clientIp(req), companies: parsed.length });
   if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 429, headers: { "retry-after": String(gate.retryAfterSec ?? 3600) } });
 
   const now = deps.now();
   const sendEnabled = body.send !== false;
-  const run: RunRecord = { id: randomUUID(), mode: body.mode === "discover" ? "discover" : "paste", sendEnabled, companyIds: [], createdAt: now.toISOString(), public: true };
+  const run: RunRecord = { id: randomUUID(), mode: body.mode === "discover" ? "discover" : "paste", sendEnabled, companyIds: [], createdAt: now.toISOString(), public: true, ...(crit?.ok ? { criteria: crit.criteria } : {}) };
   const companies = parsed.map((p, i) =>
     newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name, p.contactName && p.contactRole ? { name: p.contactName, role: p.contactRole } : undefined),
   );

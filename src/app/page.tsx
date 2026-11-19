@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CompanyRecord, Fact } from "@/lib/types";
+import { CERT_STATUSES, CERT_TYPES, DEFAULT_CRITERIA, HEADCOUNTS, isDefault, MODELS, NOTE_MAX, STAGES, summarize, type CertType, type Criteria, type Stage } from "@/lib/criteria";
 
 type Health = {
   sendReady?: boolean;
@@ -19,11 +20,23 @@ type Candidate = { domain: string; name: string; why: string };
 
 const LS_RUN = "sprinto:lastRun";
 const MISSING_TEXT: Record<string, string> = {
-  cert_status: "Certification status is ambiguous: a mention was found that does not say whether the company itself holds the certification (see the reason above for the exact quote). A person needs to check its security or trust page.",
-  saas: "B2B SaaS status: the pages checked do not clearly say what the company sells or to whom.",
-  stage: "Funding stage: no named stage (Series A-C) on the site and fewer than two stage proxies (5+ open roles, enterprise pricing tier).",
-  certs: "Certification status: no security or trust page was found at the standard paths, so SOC 2 / ISO 27001 / GDPR could not be checked.",
+  cert_status: "Certification status is unclear: the site mentions a certification without saying the company itself holds it. Check its security or trust page.",
+  saas: "B2B SaaS status: the pages checked don’t say clearly what the company sells or to whom.",
+  stage: "Funding stage: the site names no stage, and there are fewer than two signals such as 5+ open roles or an enterprise plan.",
+  certs: "Certifications: no security or trust page was found, so SOC 2, ISO 27001 and GDPR could not be checked.",
 };
+const FIELD_LABEL: Record<string, string> = { saas: "B2B SaaS status", stage: "funding stage", certs: "certifications", cert_status: "certification status" };
+const FLAG_TEXT: Record<string, string> = {
+  stage_is_proxy: "Stage named on the company’s site, not independently confirmed",
+  stage_proxies_only: "Stage estimated from hiring and pricing signals",
+  certs_unverified_no_security_page: "No security page found, so certifications are unconfirmed",
+  headcount_unknown: "Headcount unknown",
+  headcount_in_band: "Headcount within 50 to 200",
+};
+function flagText(f: string) {
+  const m = f.match(/^headcount_outside_50_200 \((\d+)\)$/);
+  return m ? `Headcount ${m[1]}, outside 50 to 200` : FLAG_TEXT[f] ?? f.replace(/_/g, " ");
+}
 
 async function api<T>(url: string, body?: unknown, method = body === undefined ? "GET" : "POST"): Promise<T> {
   const res = await fetch(url, {
@@ -120,17 +133,17 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
           {c.decision.reasons.map((r, i) => (
             <li key={i}>{r}</li>
           ))}
-          {c.decision.flags.length > 0 && <li className="hint">Flags: {c.decision.flags.join(", ")}</li>}
-          {c.decision.stageProxies.length > 0 && <li className="hint">Stage proxies: {c.decision.stageProxies.join("; ")}</li>}
+          {c.decision.flags.length > 0 && <li className="hint">Notes: {c.decision.flags.map(flagText).join("; ")}</li>}
+          {c.decision.stageProxies.length > 0 && <li className="hint">Stage signals: {c.decision.stageProxies.join("; ")}</li>}
         </ul>
       )}
 
       {f && finished && (
         <details open={c.decision.result !== "fit"}>
-          <summary>Evidence and extracted fields</summary>
+          <summary>Evidence</summary>
           <table>
             <thead>
-              <tr><th>Field</th><th>Value</th><th>Basis</th><th>Evidence (verbatim quote and page)</th></tr>
+              <tr><th>Field</th><th>Value</th><th>Basis</th><th>Quote from the site</th></tr>
             </thead>
             <tbody>
               <FactRow label="Company" fact={f.company_name} />
@@ -163,14 +176,14 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
           </table>
           {f.conflicts.length > 0 && <div className="err">Conflicting evidence: {f.conflicts.join("; ")}</div>}
           {c.droppedClaims.length > 0 && (
-            <p className="hint">Dropped {c.droppedClaims.length} model claim(s) that had no verifiable quote on the fetched pages: {c.droppedClaims.join(" | ")}</p>
+            <p className="hint">Left out {c.droppedClaims.length} AI claim{c.droppedClaims.length === 1 ? "" : "s"} with no matching quote on the site: {c.droppedClaims.join(" | ")}</p>
           )}
         </details>
       )}
 
       {c.pages.length > 0 && (
         <details>
-          <summary>Pages fetched ({c.pages.filter((p) => p.ok).length}/{c.pages.length}) and research loop ({c.research.loops}/{c.research.cap})</summary>
+          <summary>Pages checked ({c.pages.filter((p) => p.ok).length} of {c.pages.length} loaded)</summary>
           <ul className="ul">
             {c.pages.map((p, i) => (
               <li key={i}>
@@ -181,20 +194,20 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
           {c.research.steps.length > 0 && (
             <ul className="ul">
               {c.research.steps.map((s, i) => (
-                <li key={i}>Loop {i + 1}: needed <b>{s.field}</b>; {s.url ? <>fetched {shortUrl(s.url)} {s.ok ? "✓" : `✗ ${s.note ?? ""}`}</> : <>no page left to try</>}</li>
+                <li key={i}>Step {i + 1}: looked for {FIELD_LABEL[s.field] ?? s.field}; {s.url ? <>tried {shortUrl(s.url)} {s.ok ? "✓" : `✗ ${s.note ?? ""}`}</> : <>no page left to try</>}</li>
               ))}
             </ul>
           )}
-          {c.research.exhausted && <p className="hint">Research budget exhausted; stopped and routed per the rules.</p>}
+          {c.research.exhausted && <p className="hint">Stopped at the research limit for this company ({c.research.cap} extra steps).</p>}
         </details>
       )}
 
       {finished && c.decision.result === "skip" && (
-        <p className="hint">Terminal: this company fails a hard ICP rule, so no contact lookup and no draft are made for it. Remove it from the list.</p>
+        <p className="hint">Outside Sprinto’s target, so there is no contact lookup or draft.</p>
       )}
       {finished && c.decision.result === "manual_review" && (
         <details open>
-          <summary>What is missing, and what you can do</summary>
+          <summary>What is missing</summary>
           {c.decision.missing.length > 0 ? (
             <ul className="ul">
               {c.decision.missing.map((m) => (
@@ -202,11 +215,10 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
               ))}
             </ul>
           ) : (
-            <p className="hint">The reasons above explain why this needs a human look.</p>
+            <p className="hint">The reasons above say why this needs a person to check.</p>
           )}
           <p className="hint">
-            This stays a manual-review case. To resolve it, check the missing item yourself (for example funding on the company’s own announcements, or its trust page) and re-run the exact domain.
-            You can also add a contact below to get a clearly labelled <b>manual-review draft</b>. That does not change the decision, and previews still go only to the owner’s inbox.
+            Check the missing item yourself, for example on the company’s funding announcements or trust page. You can also add a contact below to get a draft marked as manual review. The decision stays the same.
           </p>
         </details>
       )}
@@ -220,14 +232,14 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
           ) : (
             <>
               <p className="uncertain">Skipped: {c.contactSkip}</p>
-              <p className="hint">You can add a real contact yourself to continue. Nothing is ever sent to them; the preview goes only to your inbox.</p>
+              <p className="hint">Add a real contact to continue. They are never emailed; the preview goes to the owner’s inbox.</p>
               <div className="grid2">
                 <input type="text" placeholder="Full name" value={cName} onChange={(e) => setCName(e.target.value)} />
                 <input type="text" placeholder="Role (e.g. Head of Security)" value={cRole} onChange={(e) => setCRole(e.target.value)} />
               </div>
               <div className="sendrow">
                 <button className="secondary" disabled={busy || cName.trim().length < 3 || cRole.trim().length < 2} onClick={() => onContact(c.id, cName, cRole)}>
-                  {busy ? "Working…" : c.decision.result === "manual_review" ? "Draft anyway (labelled manual-review)" : "Continue with this contact"}
+                  {busy ? "Working…" : c.decision.result === "manual_review" ? "Draft anyway (marked manual review)" : "Continue with this contact"}
                 </button>
               </div>
             </>
@@ -237,11 +249,11 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
 
       {c.pains && (
         <details open>
-          <summary>Two most likely pain points</summary>
+          <summary>Likely pain points</summary>
           <ul className="ul">
             {c.pains.map((p, i) => (
               <li key={i}>
-                <b>{p.pain}</b> <span className={`conf ${p.grounded ? "stated" : "proxy"}`}>{p.grounded ? `grounded, ${p.certainty} certainty` : "UNGROUNDED"}</span>
+                <b>{p.pain}</b> <span className={`conf ${p.grounded ? "stated" : "proxy"}`}>{p.grounded ? `quoted, ${p.certainty} certainty` : "no supporting quote"}</span>
                 <div>{p.reasoning}</div>
                 <div className="quote">“{p.evidence.quote}” {p.evidence.url && <a href={p.evidence.url} target="_blank" rel="noreferrer">{shortUrl(p.evidence.url)}</a>}</div>
               </li>
@@ -252,23 +264,23 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
 
       {c.draft && (
         <details open>
-          <summary>Draft email ({c.draft.status.replace("_", " ")}){c.draft.label === "manual_review" ? " · MANUAL-REVIEW DRAFT" : ""}</summary>
-          {c.draft.label === "manual_review" && <div className="err">Manual-review draft: this company is not qualified as a fit. The decision above is unchanged and unresolved items stay marked uncertain.</div>}
+          <summary>Draft email ({c.draft.status.replace("_", " ")}){c.draft.label === "manual_review" ? " · manual-review draft" : ""}</summary>
+          {c.draft.label === "manual_review" && <div className="err">Manual-review draft. This company is not a confirmed fit, and anything unresolved stays marked uncertain.</div>}
           <div className="hint">Subject</div>
           <div><b>{c.draft.subject}</b></div>
           <pre className="mail">{c.draft.body}</pre>
           <div className="hook">
             <b>Hook:</b> {c.draft.hook}
-            <div className="quote">Evidence: “{c.draft.hookEvidence.quote}” {c.draft.hookEvidence.url && <a href={c.draft.hookEvidence.url} target="_blank" rel="noreferrer">{shortUrl(c.draft.hookEvidence.url)}</a>} · {c.draft.hookGrounded ? "verified on page" : "NOT verified on any page"}</div>
+            <div className="quote">Source: “{c.draft.hookEvidence.quote}” {c.draft.hookEvidence.url && <a href={c.draft.hookEvidence.url} target="_blank" rel="noreferrer">{shortUrl(c.draft.hookEvidence.url)}</a>} · {c.draft.hookGrounded ? "found on the page" : "not found on any page"}</div>
           </div>
-          {c.draft.uncertainFields.length > 0 && <p className="hint">Shown as uncertain (not stated as fact): {c.draft.uncertainFields.join("; ")}</p>}
+          {c.draft.uncertainFields.length > 0 && <p className="hint">Marked uncertain in the draft: {c.draft.uncertainFields.join("; ")}</p>}
           {c.draft.problems.length > 0 && <div className="err">{c.draft.problems.join(" ")}</div>}
         </details>
       )}
 
       {c.send && (
         <details open>
-          <summary>Own-inbox send result</summary>
+          <summary>Preview email</summary>
           <div className="sendrow">
             <span className={`badge ${c.send.status === "sent" || c.send.status === "duplicate_prevented" ? "b-fit" : c.send.status === "failed" || c.send.status === "blocked" ? "b-error" : "b-manual_review"}`}>{c.send.status.replace(/_/g, " ")}</span>
             <span>{c.send.note}</span>
@@ -277,9 +289,8 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
           {c.draft?.status === "ready" && (
             <div className="sendrow">
               <button className="secondary" disabled={busy} onClick={() => onResend(c.id)}>
-                {c.send.status === "sent" || c.send.status === "duplicate_prevented" ? "Try sending again (the lock should refuse)" : `Send preview to my inbox${c.send.status === "unknown" ? " (checks Gmail first)" : ""}`}
+                {c.send.status === "sent" || c.send.status === "duplicate_prevented" ? "Send again (duplicate protection blocks it)" : `Send preview to my inbox${c.send.status === "unknown" ? " (checks whether it already went)" : ""}`}
               </button>
-              <span className="hint">Run {c.runId.slice(0, 8)} · company {c.id.slice(0, 8)}</span>
             </div>
           )}
         </details>
@@ -299,21 +310,88 @@ function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord
   );
 }
 
+type SearchResult = { criteria: Criteria; candidates: Candidate[] };
+const cloneDefaults = (): Criteria => ({ ...DEFAULT_CRITERIA, stages: [...DEFAULT_CRITERIA.stages], certTypes: [...DEFAULT_CRITERIA.certTypes] });
+
+function Toggle({ checked, disabled, onChange, children }: { checked: boolean; disabled?: boolean; onChange: (v: boolean) => void; children: React.ReactNode }) {
+  return (
+    <label className="pill">
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span>{children}</span>
+    </label>
+  );
+}
+
+function Filters({ value, onChange }: { value: Criteria; onChange: (c: Criteria) => void }) {
+  const set = (p: Partial<Criteria>) => onChange({ ...value, ...p });
+  const toggleStage = (s: Stage, on: boolean) => {
+    if (s === "any") return set({ stages: on ? ["any"] : [...DEFAULT_CRITERIA.stages] });
+    const rest = value.stages.filter((x) => x !== "any" && x !== s);
+    const next = on ? [...rest, s] : rest;
+    set({ stages: next.length ? (Object.keys(STAGES) as Stage[]).filter((k) => next.includes(k)) : ["any"] });
+  };
+  const toggleCert = (t: CertType, on: boolean) => {
+    const next = on ? [...value.certTypes, t] : value.certTypes.filter((x) => x !== t);
+    if (next.length === 0) return; // keep at least one; "Any certification status" is the way to drop the filter
+    set({ certTypes: (Object.keys(CERT_TYPES) as CertType[]).filter((k) => next.includes(k)) });
+  };
+  return (
+    <div className="filters">
+      <fieldset className="f-wide">
+        <legend>Funding stage</legend>
+        <div className="pills">
+          {(Object.keys(STAGES) as Stage[]).map((s) => (
+            <Toggle key={s} checked={value.stages.includes(s)} onChange={(on) => toggleStage(s, on)}>{STAGES[s]}</Toggle>
+          ))}
+        </div>
+      </fieldset>
+      <div className="field">
+        <label htmlFor="f-emp">Employees</label>
+        <select id="f-emp" value={value.headcount} onChange={(e) => set({ headcount: e.target.value as Criteria["headcount"] })}>
+          {Object.entries(HEADCOUNTS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="f-model">Business model</label>
+        <select id="f-model" value={value.model} onChange={(e) => set({ model: e.target.value as Criteria["model"] })}>
+          {Object.entries(MODELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="f-cert">Certification</label>
+        <select id="f-cert" value={value.certStatus} onChange={(e) => set({ certStatus: e.target.value as Criteria["certStatus"] })}>
+          {Object.entries(CERT_STATUSES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+        </select>
+      </div>
+      <fieldset disabled={value.certStatus === "any"}>
+        <legend>Certification types</legend>
+        <div className="pills">
+          {(Object.keys(CERT_TYPES) as CertType[]).map((t) => (
+            <Toggle key={t} checked={value.certTypes.includes(t)} disabled={value.certStatus === "any"} onChange={(on) => toggleCert(t, on)}>{CERT_TYPES[t]}</Toggle>
+          ))}
+        </div>
+      </fieldset>
+      <div className="field f-wide">
+        <label htmlFor="f-note">Industry or region (optional)</label>
+        <input id="f-note" type="text" maxLength={NOTE_MAX} placeholder="e.g. fintech in Europe" value={value.note} onChange={(e) => set({ note: e.target.value })} />
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
-  const [tab, setTab] = useState<"paste" | "discover">("paste");
-  const [text, setText] = useState("");
+  const [criteria, setCriteria] = useState<Criteria>(cloneDefaults);
+  const [result, setResult] = useState<SearchResult | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [searching, setSearching] = useState(false);
   const [send, setSend] = useState(true);
   const [health, setHealth] = useState<Health | null>(null);
+  const [healthDone, setHealthDone] = useState(false);
   const [companies, setCompanies] = useState<CompanyRecord[]>([]);
+  const [runCriteria, setRunCriteria] = useState<Criteria | null>(null);
   const [running, setRunning] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
-  const [healthDone, setHealthDone] = useState(false);
-  const [cands, setCands] = useState<Candidate[]>([]);
-  const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [caveat, setCaveat] = useState("");
-  const [note, setNote] = useState("");
-  const [discovering, setDiscovering] = useState(false);
   const stop = useRef(false);
 
   const patch = useCallback((c: CompanyRecord) => setCompanies((prev) => prev.map((x) => (x.id === c.id ? c : x))), []);
@@ -325,9 +403,10 @@ export default function Home() {
         try {
           const last = new URLSearchParams(window.location.search).get("run") ?? localStorage.getItem(LS_RUN);
           if (last && /^[0-9a-f-]{36}$/.test(last)) {
-            api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`)
+            api<{ run: { criteria?: Criteria }; companies: CompanyRecord[] }>(`/api/runs/${last}`)
               .then((r) => {
                 setCompanies(r.companies);
+                setRunCriteria(r.run?.criteria ?? null);
                 for (const c of r.companies) if (c.status === "queued" || c.status === "running") void processOne(c);
               })
               .catch(() => undefined);
@@ -373,21 +452,45 @@ export default function Home() {
         /* transient: keep polling */
       }
     }
-    if (!stop.current) patch({ ...c, status: "error", error: "This is taking longer than expected. Reload the page to check the result, or press Retry." });
+    if (!stop.current) patch({ ...c, status: "error", error: "This is taking longer than expected. Reload the page to see the result, or press Retry." });
   }
 
-  async function start() {
+  async function search() {
+    setSearching(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await api<SearchResult>("/api/discover", { criteria });
+      setResult(r);
+      setPicked(new Set(r.candidates.map((c) => c.domain)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Search failed");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function research() {
+    if (!result) return;
+    const chosen = result.candidates.filter((c) => picked.has(c.domain));
+    if (chosen.length === 0) return;
     setError(null);
     setRunning(true);
     stop.current = false;
     try {
-      const r = await api<{ run: { id: string }; companies: CompanyRecord[] }>("/api/runs", { domains: text, send, mode: tab });
+      const r = await api<{ run: { id: string; criteria?: Criteria }; companies: CompanyRecord[] }>("/api/runs", {
+        domains: chosen.map((c) => `${c.domain} | ${c.name}`),
+        send,
+        mode: "discover",
+        criteria: result.criteria,
+      });
       try {
         localStorage.setItem(LS_RUN, r.run.id);
       } catch {
         /* ignore */
       }
       setCompanies(r.companies);
+      setRunCriteria(r.run.criteria ?? result.criteria);
       api<Health>("/api/health").then(setHealth).catch(() => undefined);
       const queue = [...r.companies];
       const worker = async () => {
@@ -402,6 +505,13 @@ export default function Home() {
     } finally {
       setRunning(false);
     }
+  }
+
+  async function retryErrors() {
+    setRunning(true);
+    stop.current = false;
+    for (const c of companies.filter((x) => x.status === "error")) await processOne(c);
+    setRunning(false);
   }
 
   async function withBusy(id: string, fn: () => Promise<CompanyRecord>) {
@@ -423,59 +533,35 @@ export default function Home() {
     withBusy(id, async () => (await api<{ company: CompanyRecord }>(`/api/companies/${id}/contact`, { name, role })).company);
   const onResend = (id: string) => withBusy(id, async () => (await api<{ company: CompanyRecord }>(`/api/companies/${id}/send`, {})).company);
 
-  async function discover() {
-    setDiscovering(true);
-    setError(null);
-    try {
-      const r = await api<{ candidates: Candidate[]; caveat: string }>("/api/discover", { note });
-      setCands(r.candidates);
-      setPicked(new Set(r.candidates.map((c) => c.domain)));
-      setCaveat(r.caveat);
-      if (r.candidates.length === 0) setError("No usable candidates came back. Try again or add guidance.");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Discovery failed");
-    } finally {
-      setDiscovering(false);
-    }
-  }
-  function useCandidates() {
-    const lines = cands.filter((c) => picked.has(c.domain)).map((c) => `${c.domain} | ${c.name}`);
-    setText(lines.join("\n"));
-    setTab("paste");
-  }
-
   const counts = companies.reduce<Record<string, number>>((m, c) => {
     const k = c.status === "done" ? c.decision.result : c.status;
     m[k] = (m[k] ?? 0) + 1;
     return m;
   }, {});
+  const chosenCount = result ? result.candidates.filter((c) => picked.has(c.domain)).length : 0;
 
   return (
     <main className="wrap">
       <h1>Sprinto</h1>
       <p className="sub">
-        Cold-outreach research assistant for Sprinto’s Growth Lead. Paste company domains (or discover them from the ICP). For each one it scrapes the site,
-        extracts facts with cited evidence, qualifies against the ICP, finds a contact, drafts a grounded first email and sends a preview <b>only to the owner’s own inbox</b>.
-        Nothing is ever sent to a prospect. This is a free-tier demo with small daily limits; your results are visible only through your own run link.
+        Find companies, check each one against Sprinto’s target customer using quotes from its own website, and draft a first email.
+        Drafts go to the owner’s inbox as previews; prospects are never emailed.
       </p>
 
-      <div className="chips" aria-label="System status">
+      <div className="chips" aria-label="Status">
         {health ? (
           <>
+            <span className={`chip ${health.sendReady ? "ok" : "warn"}`}>Preview email {health.sendReady ? "on, to the owner’s inbox only" : "off: drafts are shown, nothing is sent"}</span>
             <span className={`chip ${health.contactLookup ? "ok" : "warn"}`}>Contact lookup {health.contactLookup ? "on" : "off: add contacts by hand"}</span>
-            <span className={`chip ${health.sendReady ? "ok" : "warn"}`}>Preview email {health.sendReady ? "on: goes only to the owner’s inbox" : "not connected yet: drafts are shown, nothing is sent"}</span>
+            {health.gemini === false && <span className="chip warn">AI not configured</span>}
+            {health.store && !health.store.durable && <span className="chip warn">Results are not saved between visits</span>}
             {health.allowance && (
               <span className={`chip ${health.allowance.runsLeftThisHourForYou > 0 ? "" : "warn"}`}>
-                Demo limits: <Num v={health.allowance.runsLeftThisHourForYou} /> of {health.allowance.runsHourlyCap} runs left for you this hour
+                <Num v={health.allowance.runsLeftThisHourForYou} /> of {health.allowance.runsHourlyCap} research runs left for you this hour
               </span>
             )}
-            <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
-            {health.hunterAccount && (
-              <span className="chip">Hunter {health.hunterAccount.plan ?? "plan ?"}: {health.hunterAccount.available !== null && health.hunterAccount.used !== null ? `${health.hunterAccount.available - health.hunterAccount.used} of ${health.hunterAccount.available} left` : "usage unknown"}</span>
-            )}
-            {health.store && <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>}
             {health.usageToday && health.caps && (
-              <span className="chip">Today: <Num v={health.usageToday.companies} />/{health.caps.companiesGlobalPerDay} companies · <Num v={health.usageToday.geminiCalls} />/{health.caps.geminiDailyCallCap} AI calls · <Num v={health.usageToday.sends} />/{health.caps.sendsGlobalPerDay} preview emails · Hunter <Num v={health.usageToday.hunterThisMonth} />/{health.caps.hunterMonthlyCap} lookups this month</span>
+              <span className="chip">Used today: <Num v={health.usageToday.companies} /> of {health.caps.companiesGlobalPerDay} companies · <Num v={health.usageToday.geminiCalls} /> of {health.caps.geminiDailyCallCap} AI calls · <Num v={health.usageToday.sends} /> of {health.caps.sendsGlobalPerDay} previews · <Num v={health.usageToday.hunterThisMonth} /> of {health.caps.hunterMonthlyCap} contact lookups this month</span>
             )}
           </>
         ) : healthDone ? (
@@ -490,78 +576,75 @@ export default function Home() {
         )}
       </div>
 
-      <div className="card">
-        <div className="tabs" role="tablist" data-active={tab}>
-          <button className="tab" role="tab" aria-selected={tab === "paste"} onClick={() => setTab("paste")}>Paste domains</button>
-          <button className="tab" role="tab" aria-selected={tab === "discover"} onClick={() => setTab("discover")}>Discover from ICP</button>
+      <section className="card" aria-labelledby="search-h">
+        <h2 id="search-h" className="sec">Who to look for</h2>
+        <p className="hint target">
+          The defaults are Sprinto’s target. You can search wider, but every company is still judged against that target: B2B SaaS, Series A to C, and no SOC 2, ISO 27001 or GDPR held yet.
+        </p>
+        <Filters value={criteria} onChange={setCriteria} />
+        <div className="sendrow">
+          <button className={searching ? "primary busy" : "primary"} aria-busy={searching} disabled={searching || running} onClick={search}>{searching ? "Finding…" : "Find companies"}</button>
+          {!isDefault(criteria) && <button className="secondary" disabled={searching} onClick={() => setCriteria(cloneDefaults())}>Reset to Sprinto’s target</button>}
         </div>
 
-        {tab === "paste" ? (
-          <>
-            <textarea
-              aria-label="Company domains"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={"One domain per line (max 10):\nacme.com\nanother.io | Another Inc\nthird.com | Third Inc | Jane Doe | Head of Security\n\nOptional 2nd field = expected name (guards against same-name look-alikes).\nOptional 3rd and 4th = a real contact to use if Hunter finds nobody."}
-            />
-            <label className="row">
-              <input type="checkbox" checked={send} onChange={(e) => setSend(e.target.checked)} />
-              <span>Send each finished draft as a preview to my own inbox. The only possible recipient is the owner’s address, enforced on the server.</span>
-            </label>
-          </>
-        ) : (
-          <>
-            <p className="hint">ICP: B2B SaaS, Series A-C, about 50-200 employees, likely under SOC 2 / ISO 27001 / GDPR pressure, no certification held yet.</p>
-            <input type="text" placeholder="Optional guidance, e.g. fintech or healthtech SaaS" value={note} onChange={(e) => setNote(e.target.value)} />
-            <div className="sendrow">
-              <button className="primary" disabled={discovering} onClick={discover}>{discovering ? "Finding…" : "Suggest candidate domains"}</button>
-              {cands.length > 0 && <button className="secondary" onClick={useCandidates} disabled={picked.size === 0}>Use {picked.size} selected</button>}
-            </div>
-            {caveat && <p className="hint">{caveat}</p>}
-            {cands.map((c) => (
-              <label className="cand" key={c.domain}>
-                <input
-                  type="checkbox"
-                  checked={picked.has(c.domain)}
-                  onChange={(e) => setPicked((s) => { const n = new Set(s); if (e.target.checked) n.add(c.domain); else n.delete(c.domain); return n; })}
-                />
-                <span><b>{c.name}</b> · {c.domain}<br /><span className="hint">{c.why}</span></span>
-              </label>
-            ))}
-          </>
+        {result && (
+          <div className="cands" aria-live="polite">
+            <h3 className="sec2">{result.candidates.length === 0 ? "No suggestions" : `${result.candidates.length} suggestion${result.candidates.length === 1 ? "" : "s"}`}</h3>
+            <p className="hint">Searched for: {summarize(result.criteria)}</p>
+            {result.candidates.length === 0 ? (
+              <p className="hint">Nothing came back for these criteria. Try a wider search or different guidance.</p>
+            ) : (
+              <>
+                <p className="hint">Suggested by the AI from memory and not checked yet. Research verifies each one on its own website.</p>
+                {result.candidates.map((c) => (
+                  <label className="cand" key={c.domain}>
+                    <input
+                      type="checkbox"
+                      checked={picked.has(c.domain)}
+                      onChange={(e) => setPicked((s) => { const n = new Set(s); if (e.target.checked) n.add(c.domain); else n.delete(c.domain); return n; })}
+                    />
+                    <span><b>{c.name}</b> · {c.domain}{c.why && <><br /><span className="hint">{c.why}</span></>}</span>
+                  </label>
+                ))}
+                <label className="row">
+                  <input type="checkbox" checked={send} onChange={(e) => setSend(e.target.checked)} />
+                  <span>Email each finished draft to the owner’s inbox as a preview</span>
+                </label>
+              </>
+            )}
+          </div>
         )}
         {error && <div className="err" role="alert">{error}</div>}
-      </div>
+      </section>
 
-      {tab === "paste" && (
+      {(chosenCount > 0 || running) && (
         <div className="runbar">
-          <button className={running ? "primary busy" : "primary"} aria-busy={running} disabled={running || text.trim().length < 3} onClick={start}>
-            {running ? "Researching…" : "Run research"}
+          <button className={running ? "primary busy" : "primary"} aria-busy={running} disabled={running || chosenCount === 0} onClick={research}>
+            {running ? "Researching…" : `Research ${chosenCount} selected`}
           </button>
-          {running && (
-            <button className="secondary" onClick={() => (stop.current = true)}>Stop after current</button>
-          )}
+          {running && <button className="secondary" onClick={() => (stop.current = true)}>Stop after current</button>}
         </div>
       )}
 
       {companies.length > 0 && (
-        <p className="hint summaryline" aria-live="polite">
-          {companies.length} compan{companies.length === 1 ? "y" : "ies"}: <Num v={counts.fit ?? 0} /> fit · <Num v={counts.manual_review ?? 0} /> manual review · <Num v={counts.skip ?? 0} /> skipped · <Num v={(counts.running ?? 0) + (counts.queued ?? 0)} /> in progress{counts.error ? ` · ${counts.error} error` : ""}
-          {companies.some((c) => c.status === "error") && (
-            <> · <button className="secondary" disabled={running} onClick={async () => { setRunning(true); for (const c of companies.filter((x) => x.status === "error")) await processOne(c); setRunning(false); }}>Retry errors</button></>
-          )}
-        </p>
+        <section aria-label="Results">
+          <p className="hint summaryline" aria-live="polite">
+            {companies.length} compan{companies.length === 1 ? "y" : "ies"}: <Num v={counts.fit ?? 0} /> fit · <Num v={counts.manual_review ?? 0} /> manual review · <Num v={counts.skip ?? 0} /> skipped · <Num v={(counts.running ?? 0) + (counts.queued ?? 0)} /> in progress{counts.error ? ` · ${counts.error} failed` : ""}
+            {companies.some((c) => c.status === "error") && (
+              <> · <button className="secondary" disabled={running} onClick={retryErrors}>Retry failed</button></>
+            )}
+          </p>
+          {runCriteria && <p className="hint">Searched for: {summarize(runCriteria)}. Judged against Sprinto’s target.</p>}
+          <p className="hint"><a href={`/?run=${companies[0].runId}`}>Link to these results</a> · anyone with the link can see them</p>
+          {companies.map((c, i) => (
+            <Company key={c.id} c={c} index={i} onContact={onContact} onResend={onResend} busy={busyIds.has(c.id)} />
+          ))}
+        </section>
       )}
-      {companies.length > 0 && (
-        <p className="hint">Run id: <code>{companies[0].runId}</code> · <a href={`/?run=${companies[0].runId}`}>your private run link</a> <span>(anyone with this link can view this run, so keep it to yourself)</span></p>
-      )}
-      {companies.map((c) => (
-        <Company key={c.id} c={c} index={companies.indexOf(c)} onContact={onContact} onResend={onResend} busy={busyIds.has(c.id)} />
-      ))}
 
       <p className="foot">
-        Sprinto never invents company facts or contacts: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
-        Qualification rules are deterministic code; the model only extracts and drafts. Built for Mesa Term 2 AI Case 2.
+        Every fact shown has a quote from the company’s own pages; anything without one is marked uncertain. Fit decisions follow fixed rules, and the AI only extracts facts and writes drafts.
+        Built for Mesa Term 2, AI Case 2.
       </p>
     </main>
   );

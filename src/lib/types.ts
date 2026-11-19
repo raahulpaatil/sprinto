@@ -1,4 +1,5 @@
 // Shared types for the Sprinto research pipeline.
+import type { Criteria } from "./criteria";
 
 export type Confidence = "stated" | "proxy" | "unknown";
 
@@ -176,6 +177,8 @@ export interface RunRecord {
   companyIds: string[];
   createdAt: string;
   note?: string;
+  /** Search criteria the candidates were discovered with. Display only: qualification never reads it. */
+  criteria?: Criteria;
   /** Set on every run created through the app. Only runs with this flag are readable, and only through their own unguessable id. */
   public?: boolean;
 }

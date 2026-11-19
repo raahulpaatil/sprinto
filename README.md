@@ -8,13 +8,13 @@ Cold-outreach research assistant for Sprinto's Growth Lead (Mesa Term 2, AI Case
 
 ## Status
 
-One app for everyone, no sign-in and no roles: anyone with the link can paste domains or use ICP discovery, watch the run, read the result for their own run (via that run's unguessable URL), add a contact, and trigger the preview email. Previews can only ever go to the owner's inbox. One shared set of limits applies to everyone (see below), and the page shows what is left.
+One app for everyone, no sign-in and no roles: anyone with the link can search for companies, pick which to research, watch the run, read the result for their own run (via that run's unguessable URL), add a contact, and trigger the preview email. Previews can only ever go to the owner's inbox. One shared set of limits applies to everyone (see below), and the page shows what is left.
 
 Disabled (404): connecting or relinking Gmail from the web. The existing connection is used server-side only and its token is never exposed.
 
 ## Pipeline (per company domain)
 
-0. **Discover (optional):** suggests candidate domains from the ICP. These come from the model's memory, are labelled unverified, and every one still goes through the full pipeline.
+0. **Discover:** the only way in. Filters for funding stage, headcount, business model, certification status and type, plus optional industry or region guidance. The defaults are Sprinto's target (Series A to C, 50 to 200 employees, B2B SaaS, no SOC 2 / ISO 27001 / GDPR held). Filters are allowlisted on the server (`src/lib/criteria.ts`) and turned into the discovery prompt. Suggestions come from the model's memory, are labelled unverified, and every selected one goes through the full pipeline. A wider search does not change qualification: `qualify.ts` never reads the criteria, so a pre-seed company found by a pre-seed search is still a Skip. The run saves the criteria for display on its run link.
 1. **Scrape:** homepage plus a bounded number of extra pages (cap 4: about, product, pricing, careers, security/trust, customers). Built-in fetch with SSRF protection, then HTML cleaning (nav, footer, cookie banners and boilerplate removed). Fetch failures are logged, never papered over.
 2. **Extract:** Gemini returns structured facts, each with a quote and URL. Code checks every quote against the fetched text; unverifiable claims are dropped and logged.
 3. **Qualify:** deterministic rules (the model never decides fit), with a bounded research loop (max 2 extra fetches when a required field is missing, then stop).
@@ -50,6 +50,8 @@ npm install
 cp .env.example .env     # then fill in the values
 npm run dev              # http://localhost:3000
 npm run eval             # offline checker pass (no network, no keys needed)
+npm run build && npx next start -p 3100   # then, in another shell:
+node scripts/e2e.mjs     # browser journey with mocked APIs (needs Playwright + Chromium installed globally)
 npm run smoke -- acme.com   # live check with real sites and Gemini
 ```
 
@@ -106,8 +108,8 @@ Credits are Hunter's own accounting; the numbers shown on the page come from Hun
 ## Layout
 
 ```
-src/lib/        pipeline, qualify, extract, draft, hunter, gmail, fetcher, store, discover, limits
+src/lib/        pipeline, qualify, extract, draft, hunter, gmail, fetcher, store, discover, criteria, limits
 src/app/api/    runs, companies/[id]/{process,contact,send}, discover, gmail/{start,callback}, health
 src/app/        the single-page UI
-scripts/        eval.ts (checker pass), smoke.ts (live), gmail-auth.mjs (optional local alternative)
+scripts/        eval.ts (checker pass), e2e.mjs (mocked browser journey), smoke.ts (live), gmail-auth.mjs (optional local alternative)
 ```
