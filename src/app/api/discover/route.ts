@@ -8,9 +8,8 @@ export const maxDuration = 60;
 
 export async function POST(req: Request) {
   const deps = liveDeps();
-  if (!(await allowDiscover(deps.store, clientIp(req)))) {
-    return NextResponse.json({ error: "Daily discovery limit reached. Try again tomorrow." }, { status: 429 });
-  }
+  const gate = await allowDiscover(deps.store, clientIp(req));
+  if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 429, headers: { "retry-after": String(gate.retryAfterSec ?? 3600) } });
   let extra: string | undefined;
   try {
     const b = (await req.json()) as { note?: unknown };

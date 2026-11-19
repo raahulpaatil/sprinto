@@ -277,9 +277,7 @@ export default function Home() {
   async function processOne(c: CompanyRecord) {
     patch({ ...c, status: "running", stage: "starting" });
     try {
-      const r = await api<{ company: CompanyRecord }>(`/api/companies/${c.id}/process`, {
-        skeleton: { runId: c.runId, domain: c.domain, expectedName: c.expectedName, sendEnabled: c.sendEnabled, hintContact: c.hintContact },
-      });
+      const r = await api<{ company: CompanyRecord }>(`/api/companies/${c.id}/process`, {});
       patch(r.company);
     } catch (e) {
       patch({ ...c, status: "error", error: e instanceof Error ? e.message : "Failed" });

@@ -9,6 +9,8 @@ import { MemoryStore } from "../src/lib/store";
 import { newCompany, processCompany, trySend, type Deps } from "../src/lib/pipeline";
 import type { LLM, LlmRequest } from "../src/lib/gemini";
 import type { CompanyRecord } from "../src/lib/types";
+import { allowAttempt, allowDiscover, allowRun, limits } from "../src/lib/limits";
+import { discoverDomains } from "../src/lib/discover";
 
 // ---------- tiny test framework ----------
 interface Result { scenario: string; check: string; ok: boolean; critical: boolean; detail?: string }
@@ -410,6 +412,42 @@ async function main() {
     check("fake signal dropped", (r.c.facts?.signals.length ?? 1) === 0, "", true);
     check("drops are logged", r.c.droppedClaims.length >= 2, String(r.c.droppedClaims.length));
     check("headcount shown as unknown", r.c.decision.flags.includes("headcount_unknown"), r.c.decision.flags.join(","));
+  }
+
+  // 14. access protection
+  current = "14 access protection (rate limits, caps)";
+  {
+    const store = new MemoryStore();
+    const t = new Date("2026-11-19T10:15:00Z");
+    const first5 = [];
+    for (let i = 0; i < 5; i++) first5.push((await allowRun(store, "1.1.1.1", t)).ok);
+    const sixth = await allowRun(store, "1.1.1.1", t);
+    check("5 runs per hour per IP allowed", first5.every(Boolean), JSON.stringify(first5));
+    check("6th run in the hour is blocked with a retry time", !sixth.ok && (sixth.retryAfterSec ?? 0) > 0 && /per hour/.test(sixth.reason ?? ""), JSON.stringify(sixth));
+    check("a different IP is unaffected", (await allowRun(store, "2.2.2.2", t)).ok);
+    check("limit resets next hour", (await allowRun(store, "1.1.1.1", new Date("2026-11-19T11:00:05Z"))).ok);
+    // global daily cap of 20, spread over many IPs so the per-IP limit never trips
+    const g = new MemoryStore();
+    let allowed = 0;
+    let blockedGlobal: { ok: boolean; reason?: string } = { ok: true };
+    for (let i = 0; i < 25; i++) {
+      const r = await allowRun(g, `10.0.0.${i}`, t);
+      if (r.ok) allowed++; else blockedGlobal = r;
+    }
+    check("global daily cap of 20 holds", allowed === limits.runsGlobalPerDay && /daily capacity/.test(blockedGlobal.reason ?? ""), `allowed=${allowed}`);
+    check("global cap resets next day", (await allowRun(g, "10.9.9.9", new Date("2026-11-20T00:00:05Z"))).ok);
+    const d = new MemoryStore();
+    const dres = [];
+    for (let i = 0; i < 6; i++) dres.push((await allowDiscover(d, "3.3.3.3", t)).ok);
+    check("discovery limited to 5 per hour per IP", dres.slice(0, 5).every(Boolean) && !dres[5], JSON.stringify(dres));
+    const a = new MemoryStore();
+    const att = [];
+    for (let i = 0; i < 4; i++) att.push(await allowAttempt(a, "process", "co-1", limits.processAttempts));
+    check("per-company attempt cap (3)", att[2] && !att[3], JSON.stringify(att));
+    const many = ["example.com", "example.org", "iana.org", "wikipedia.org", "github.com", "python.org", "nodejs.org"].map((x) => ({ domain: x, name: x, why: "t" }));
+    const found = await discoverDomains(undefined, async () => ({ candidates: many }));
+    check("discovery results capped at 5", found.length === limits.maxDiscoveryResults && found.length === 5, String(found.length));
+    check("domain cap per run is 10", limits.maxDomainsPerRun === 10);
   }
 
   // utilities

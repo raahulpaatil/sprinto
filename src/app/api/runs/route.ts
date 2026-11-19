@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { normalizeDomain } from "@/lib/fetcher";
-import { allowCompanies, clientIp, MAX_DOMAINS_PER_RUN } from "@/lib/limits";
+import { allowRun, clientIp, MAX_DOMAINS_PER_RUN } from "@/lib/limits";
 import { newCompany, liveDeps, stripPageText } from "@/lib/pipeline";
 import type { RunRecord } from "@/lib/types";
 
@@ -27,12 +27,6 @@ function parseLines(input: unknown): { domain: string; name?: string; contactNam
   return out;
 }
 
-export async function GET() {
-  const deps = liveDeps();
-  const runs = await deps.store.listRuns(10);
-  return NextResponse.json({ runs });
-}
-
 export async function POST(req: Request) {
   const deps = liveDeps();
   let body: { domains?: unknown; send?: unknown; mode?: unknown };
@@ -46,8 +40,8 @@ export async function POST(req: Request) {
   if (parsed.length > MAX_DOMAINS_PER_RUN) {
     return NextResponse.json({ error: `Please keep it to ${MAX_DOMAINS_PER_RUN} domains per run (you sent ${parsed.length}).` }, { status: 400 });
   }
-  const gate = await allowCompanies(deps.store, clientIp(req), parsed.length);
-  if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 429 });
+  const gate = await allowRun(deps.store, clientIp(req));
+  if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 429, headers: { "retry-after": String(gate.retryAfterSec ?? 3600) } });
 
   const now = deps.now();
   const sendEnabled = body.send !== false;

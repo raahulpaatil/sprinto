@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { allowAttempt, limits } from "@/lib/limits";
 import { continueWithContact, liveDeps, stripPageText } from "@/lib/pipeline";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +11,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const deps = liveDeps();
   const c = await deps.store.getCompany(id);
   if (!c) return NextResponse.json({ error: "Company record not found." }, { status: 404 });
+  if (!(await allowAttempt(deps.store, "contact", id, limits.contactAttempts))) return NextResponse.json({ error: "Too many attempts for this company." }, { status: 429 });
   let body: { name?: unknown; role?: unknown; email?: unknown };
   try {
     body = await req.json();

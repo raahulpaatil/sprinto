@@ -4,6 +4,7 @@
 import dns from "node:dns/promises";
 import type { LLM } from "./gemini";
 import { normalizeDomain } from "./fetcher";
+import { limits } from "./limits";
 
 export const ICP_TEXT =
   "B2B SaaS companies at Series A-C (roughly 50-200 employees) that sell to businesses and likely face SOC 2 / ISO 27001 / GDPR pressure from enterprise customers but do not publicly hold those certifications yet.";
@@ -11,7 +12,7 @@ export const ICP_TEXT =
 const SYSTEM = `You suggest real companies for a sales research list. Only suggest companies whose website domain you are confident exists.
 This is a memory-based suggestion list: it is NOT verified and may be out of date. Do not claim funding or headcount.
 Return ONLY JSON: {"candidates":[{"domain":"example.com","name":"Example","why":"one short reason it might fit the ICP"}]}
-Give at most 8 candidates. No duplicates. No big public companies.`;
+Give at most 5 candidates. No duplicates. No big public companies.`;
 
 export interface Candidate {
   domain: string;
@@ -35,7 +36,7 @@ export async function discoverDomains(extra: string | undefined, llm: LLM): Prom
     }
     seen.add(d);
     out.push({ domain: d, name: typeof o.name === "string" ? o.name.slice(0, 80) : d, why: typeof o.why === "string" ? o.why.slice(0, 160) : "" });
-    if (out.length >= 8) break;
+    if (out.length >= limits.maxDiscoveryResults) break;
   }
   return out;
 }

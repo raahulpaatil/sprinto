@@ -6,6 +6,8 @@ import type { Store } from "./store";
 import type { SendResult } from "./types";
 
 export const OWNER_EMAIL = "rahulmp458@gmail.com";
+/** From header only. The recipient allowlist is a constant above and cannot be changed by configuration. */
+const sender = () => (process.env.GMAIL_SENDER?.trim() || OWNER_EMAIL).replace(/[\r\n<>,"]/g, "");
 export const ALLOWED_RECIPIENTS: readonly string[] = [OWNER_EMAIL];
 
 export class SafetyError extends Error {
@@ -58,7 +60,7 @@ export function buildRaw(msg: OutboundMessage): string {
   const subject = msg.subject.replace(/[\r\n]+/g, " ").slice(0, 200);
   const body = Buffer.from(msg.text, "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n");
   const lines = [
-    `From: ${OWNER_EMAIL}`,
+    `From: ${sender()}`,
     `To: ${to}`,
     `Subject: =?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`,
     "MIME-Version: 1.0",

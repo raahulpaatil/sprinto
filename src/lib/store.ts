@@ -69,21 +69,23 @@ export class MemoryStore implements Store {
 type Row = Record<string, unknown>;
 type Exec = (sql: string, args?: unknown[]) => Promise<Row[]>;
 
-const SCHEMA = [
-  `CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, json TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, domain TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, json TEXT NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS companies_run_idx ON companies (run_id)`,
-  `CREATE TABLE IF NOT EXISTS sends (key TEXT PRIMARY KEY, company_id TEXT NOT NULL, state TEXT NOT NULL, message_id TEXT, updated_at TEXT NOT NULL, detail TEXT)`,
-  `CREATE TABLE IF NOT EXISTS counters (k TEXT PRIMARY KEY, n INTEGER NOT NULL)`,
+/** `P` is "" for SQLite and "sprinto." for Postgres (a dedicated schema, so it never collides with another app's tables). */
+const schemaFor = (P: string) => [
+  ...(P ? [`CREATE SCHEMA IF NOT EXISTS ${P.replace(".", "")}`] : []),
+  `CREATE TABLE IF NOT EXISTS ${P}runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, json TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS ${P}companies (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, domain TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, json TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS companies_run_idx ON ${P}companies (run_id)`,
+  `CREATE TABLE IF NOT EXISTS ${P}sends (key TEXT PRIMARY KEY, company_id TEXT NOT NULL, state TEXT NOT NULL, message_id TEXT, updated_at TEXT NOT NULL, detail TEXT)`,
+  `CREATE TABLE IF NOT EXISTS ${P}counters (k TEXT PRIMARY KEY, n INTEGER NOT NULL)`,
 ];
 
 class SqlStore implements Store {
-  constructor(public kind: string, public durable: boolean, private exec: Exec) {}
+  constructor(public kind: string, public durable: boolean, private exec: Exec, private P = "") {}
   private ready: Promise<void> | null = null;
   private init() {
     if (!this.ready) {
       this.ready = (async () => {
-        for (const stmt of SCHEMA) await this.exec(stmt);
+        for (const stmt of schemaFor(this.P)) await this.exec(stmt);
       })();
     }
     return this.ready;
@@ -94,37 +96,37 @@ class SqlStore implements Store {
   }
   async saveRun(run: RunRecord) {
     await this.q(
-      `INSERT INTO runs (id, created_at, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json`,
+      `INSERT INTO ${this.P}runs (id, created_at, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json`,
       [run.id, run.createdAt, JSON.stringify(run)],
     );
   }
   async getRun(id: string) {
-    const r = await this.q(`SELECT json FROM runs WHERE id = ?`, [id]);
+    const r = await this.q(`SELECT json FROM ${this.P}runs WHERE id = ?`, [id]);
     return r[0] ? (JSON.parse(String(r[0].json)) as RunRecord) : null;
   }
   async listRuns(limit: number) {
-    const r = await this.q(`SELECT json FROM runs ORDER BY created_at DESC LIMIT ${Math.max(1, Math.min(50, limit | 0))}`);
+    const r = await this.q(`SELECT json FROM ${this.P}runs ORDER BY created_at DESC LIMIT ${Math.max(1, Math.min(50, limit | 0))}`);
     return r.map((x) => JSON.parse(String(x.json)) as RunRecord);
   }
   async saveCompany(c: CompanyRecord) {
     await this.q(
-      `INSERT INTO companies (id, run_id, domain, created_at, updated_at, json) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO ${this.P}companies (id, run_id, domain, created_at, updated_at, json) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, json = excluded.json`,
       [c.id, c.runId, c.domain, c.createdAt, c.updatedAt, JSON.stringify(c)],
     );
   }
   async getCompany(id: string) {
-    const r = await this.q(`SELECT json FROM companies WHERE id = ?`, [id]);
+    const r = await this.q(`SELECT json FROM ${this.P}companies WHERE id = ?`, [id]);
     return r[0] ? (JSON.parse(String(r[0].json)) as CompanyRecord) : null;
   }
   async listCompanies(runId: string) {
-    const r = await this.q(`SELECT json FROM companies WHERE run_id = ? ORDER BY created_at ASC, id ASC`, [runId]);
+    const r = await this.q(`SELECT json FROM ${this.P}companies WHERE run_id = ? ORDER BY created_at ASC, id ASC`, [runId]);
     return r.map((x) => JSON.parse(String(x.json)) as CompanyRecord);
   }
   async claimSend(key: string, companyId: string) {
     const now = new Date().toISOString();
     const ins = await this.q(
-      `INSERT INTO sends (key, company_id, state, updated_at) VALUES (?, ?, 'pending', ?) ON CONFLICT (key) DO NOTHING RETURNING key`,
+      `INSERT INTO ${this.P}sends (key, company_id, state, updated_at) VALUES (?, ?, 'pending', ?) ON CONFLICT (key) DO NOTHING RETURNING key`,
       [key, companyId, now],
     );
     if (ins.length > 0) return { claimed: true };
@@ -133,12 +135,12 @@ class SqlStore implements Store {
   }
   async setSend(key: string, state: SendLockRow["state"], messageId?: string | null, detail?: string | null) {
     await this.q(
-      `UPDATE sends SET state = ?, message_id = COALESCE(?, message_id), detail = ?, updated_at = ? WHERE key = ?`,
+      `UPDATE ${this.P}sends SET state = ?, message_id = COALESCE(?, message_id), detail = ?, updated_at = ? WHERE key = ?`,
       [state, messageId ?? null, detail ?? null, new Date().toISOString(), key],
     );
   }
   async getSend(key: string) {
-    const r = await this.q(`SELECT key, company_id, state, message_id, updated_at, detail FROM sends WHERE key = ?`, [key]);
+    const r = await this.q(`SELECT key, company_id, state, message_id, updated_at, detail FROM ${this.P}sends WHERE key = ?`, [key]);
     const x = r[0];
     if (!x) return null;
     return {
@@ -152,7 +154,7 @@ class SqlStore implements Store {
   }
   async hit(key: string, by: number) {
     const r = await this.q(
-      `INSERT INTO counters (k, n) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET n = counters.n + excluded.n RETURNING n`,
+      `INSERT INTO ${this.P}counters AS c (k, n) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET n = c.n + excluded.n RETURNING n`,
       [key, by],
     );
     return Number(r[0]?.n ?? by);
@@ -178,7 +180,7 @@ export function getStore(): Store {
       const text = sql.replace(/\?/g, () => `$${++i}`);
       const rows = await client.query(text, args as never[]);
       return rows as unknown as Row[];
-    });
+    }, "sprinto.");
     return cached;
   }
   const onVercel = !!process.env.VERCEL;
