@@ -496,12 +496,6 @@ export default function Home() {
               <input type="checkbox" checked={send} onChange={(e) => setSend(e.target.checked)} />
               <span>Send each finished draft as a preview to my own inbox. The only possible recipient is the owner’s address, enforced on the server.</span>
             </label>
-            <button className="primary" disabled={running || text.trim().length < 3} onClick={start}>
-              {running ? "Researching…" : "Run research"}
-            </button>
-            {running && (
-              <button className="secondary" style={{ marginLeft: 8 }} onClick={() => (stop.current = true)}>Stop after current</button>
-            )}
           </>
         ) : (
           <>
@@ -527,8 +521,19 @@ export default function Home() {
         {error && <div className="err" role="alert">{error}</div>}
       </div>
 
+      {tab === "paste" && (
+        <div className="runbar">
+          <button className="primary" disabled={running || text.trim().length < 3} onClick={start}>
+            {running ? "Researching…" : "Run research"}
+          </button>
+          {running && (
+            <button className="secondary" onClick={() => (stop.current = true)}>Stop after current</button>
+          )}
+        </div>
+      )}
+
       {companies.length > 0 && (
-        <p className="hint" aria-live="polite">
+        <p className="hint summaryline" aria-live="polite">
           {companies.length} compan{companies.length === 1 ? "y" : "ies"}: {counts.fit ?? 0} fit · {counts.manual_review ?? 0} manual review · {counts.skip ?? 0} skipped · {(counts.running ?? 0) + (counts.queued ?? 0)} in progress{counts.error ? ` · ${counts.error} error` : ""}
           {companies.some((c) => c.status === "error") && (
             <> · <button className="secondary" disabled={running} onClick={async () => { setRunning(true); for (const c of companies.filter((x) => x.status === "error")) await processOne(c); setRunning(false); }}>Retry errors</button></>
