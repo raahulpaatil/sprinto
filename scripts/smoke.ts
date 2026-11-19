@@ -1,0 +1,31 @@
+// Live smoke test: real websites + real Gemini. Hunter/Gmail run only if their env vars are set.
+//   npm run smoke -- linear.app pizzahut.com
+import { MemoryStore } from "../src/lib/store";
+import { liveDeps, newCompany, processCompany } from "../src/lib/pipeline";
+
+async function main() {
+  const domains = process.argv.slice(2).filter((a) => !a.startsWith("-"));
+  if (domains.length === 0) domains.push("pizzahut.com");
+  const deps = { ...liveDeps(), store: new MemoryStore() };
+  for (const d of domains) {
+    const t0 = Date.now();
+    const c = newCompany("smoke", `smoke-${d}`, d, true, new Date());
+    await processCompany(c, deps);
+    console.log(`\n=== ${d} (${((Date.now() - t0) / 1000).toFixed(1)}s) status=${c.status} decision=${c.decision.result}`);
+    if (c.error) console.log("ERROR:", c.error);
+    console.log("reasons:", c.decision.reasons.join(" | "));
+    console.log("flags:", c.decision.flags.join(", "), "| loops:", `${c.research.loops}/${c.research.cap}`, "| pages:", c.pages.map((p) => `${p.kind}${p.ok ? "" : "(x)"}`).join(","));
+    const f = c.facts;
+    if (f) {
+      console.log("name:", f.company_name.value, "| saas:", f.is_b2b_saas.value, "| stage:", f.funding_stage.value, "| emp:", f.employee_count.value, "| roles:", f.open_roles.value, "| ent:", f.enterprise_pricing.value);
+      console.log("certs:", f.certifications.map((x) => `${x.name}:${x.status}`).join(", ") || "none");
+    }
+    if (c.droppedClaims.length) console.log("dropped:", c.droppedClaims.length);
+    console.log("contact:", c.contact ? `${c.contact.name} (${c.contact.role})` : c.contactSkip ?? "-");
+    if (c.draft) console.log("draft:", c.draft.status, "| hook grounded:", c.draft.hookGrounded, "| send:", c.send?.status);
+  }
+}
+main().catch((e) => {
+  console.error(e instanceof Error ? e.message : e);
+  process.exit(1);
+});
