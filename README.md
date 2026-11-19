@@ -8,11 +8,9 @@ Cold-outreach research assistant for Sprinto's Growth Lead (Mesa Term 2, AI Case
 
 ## Status
 
-Working end to end on the live app: scrape, extract, qualify (with the research loop), decision with reasons, the evidence table, and the draft and send guards. Waiting on three one-time steps by the owner:
+Public, no login: anyone with the link can paste domains or use ICP discovery, watch the run, read the result for **their own run** (via that run's unguessable URL), and trigger the preview email. Previews can only ever go to the owner's inbox.
 
-1. **Gmail connection:** set the client id and secret, then open `/api/gmail/start` and approve (see Gmail connect). Until then drafts are shown and the send result reads "not connected".
-2. **Hunter API key:** until `HUNTER_API_KEY` is set, a qualified company records "contact skipped". A real contact can be typed in on the company card, or given up front as `domain | name | contact name | contact role`.
-3. **Storage:** durable. Sprinto uses a dedicated `sprinto` schema in an existing Neon Postgres database.
+Owner-only: connecting or relinking Gmail (`/api/gmail/start`, `/api/gmail/callback`) and every configuration/quota readout.
 
 ## Pipeline (per company domain)
 
@@ -69,11 +67,12 @@ Without `DATABASE_URL` it stores data in `./data/sprinto.db` (SQLite). With a Po
 | `GMAIL_REFRESH_TOKEN` | optional | If set, it is used and the connect flow is skipped |
 | `GMAIL_SENDER` | optional | From address, default `rahulmp458@gmail.com`. The recipient allowlist is fixed in code |
 | `GMAIL_REDIRECT_URI` | optional | Overrides the derived redirect URI (default `<site origin>/api/gmail/callback`) |
-| `RUNS_PER_IP_PER_HOUR`, `RUNS_GLOBAL_PER_DAY`, `DISCOVER_PER_IP_PER_HOUR`, `DISCOVER_GLOBAL_PER_DAY` | optional | Override the limits below |
+| `OWNER_KEY` | yes | Owner sign-in key (at least 16 characters) |
+| Cap overrides | optional | see the cap table below |
 
 ## Owner access
 
-Live features are owner-only. Sign in at `/owner` with the value of `OWNER_KEY` (at least 16 characters; set it in Vercel, then redeploy). Vercel does not return sensitive values, so `vercel env pull` cannot refresh it locally: **for local owner runs, set a fresh `OWNER_KEY` in your local `.env` by hand** (the copy there may be stale after a rotation on Vercel). Visitors see the landing page and a static sample only.
+Only Gmail connect/callback and the configuration/quota details are owner-only. Sign in at `/owner` with the value of `OWNER_KEY` (at least 16 characters; set it in Vercel, then redeploy). Vercel does not return sensitive values, so `vercel env pull` cannot refresh it locally: **for local owner runs, set a fresh `OWNER_KEY` in your local `.env` by hand** (the copy there may be stale after a rotation on Vercel).
 
 ## Gmail connect (in the app)
 
@@ -85,12 +84,37 @@ Live features are owner-only. Sign in at `/owner` with the value of `OWNER_KEY` 
 
 With only `gmail.send`, Sprinto cannot read Sent mail. The duplicate-send lock is still atomic in the database, and after a timeout it refuses to resend rather than guess. Apps in Google's Testing mode expire refresh tokens after 7 days; reconnect via `/api/gmail/start`.
 
-## Access protection (public, no login)
+## Access protection and cost caps (public, no login)
 
-- 5 research runs per hour per visitor, 20 runs per day overall (HTTP 429 with `Retry-After`).
-- 10 domains per run. Discovery: 5 requests per hour per visitor, 20 per day overall, 5 results each.
-- Per-company caps on re-processing (3), adding a contact (3) and resending (5).
-- Run lists are not exposed; a run is only readable by its unguessable id.
+**Isolation.** A run is readable only through its own run id (a random UUID returned to the visitor who started it). There is no listing endpoint. Runs created by the owner, and any run without the `public` flag (including everything created before this model), are private and answer 404 to visitors.
+
+**Hard caps** (all enforced in code, counters in Postgres so they survive restarts and redeploys; defaults sized for free tiers, change only deliberately):
+
+| Cap | Default | Env override |
+|---|---|---|
+| Research runs per visitor IP per hour | 3 | `RUNS_PER_IP_PER_HOUR` |
+| Research runs per day, all visitors | 10 | `RUNS_GLOBAL_PER_DAY` |
+| Companies per day, all visitors | 40 | `COMPANIES_GLOBAL_PER_DAY` |
+| Domains per run | 10 | fixed |
+| Discovery requests per IP per hour / per day overall | 3 / 10 | `DISCOVER_PER_IP_PER_HOUR`, `DISCOVER_GLOBAL_PER_DAY` |
+| Discovery results | 5 | fixed |
+| Gemini calls per day (every model call is counted; refused past the cap) | 150 | `GEMINI_DAILY_CALL_CAP` |
+| Preview emails per day | 25 | `SENDS_GLOBAL_PER_DAY` |
+| Re-process / add-contact / resend per company | 3 / 3 / 5 | fixed |
+
+Over a limit the app shows "Daily demo limit reached, try again tomorrow" (or the hourly equivalent with a retry time), never a crash. A Gemini 429 is treated the same way.
+
+**Hunter credits (never approximated).** One lookup = one Domain Search with `limit=10` and at most one retry after a failed call. Every lookup passes four gates, each a graceful skip with a visible note on the company card:
+1. at most one lookup per company record;
+2. at most 5 lookups per run (`HUNTER_PER_RUN_CAP`), however many domains it has;
+3. Hunter's own account endpoint is read fresh before each lookup and the lookup is refused if it would leave fewer than 10 credits (`HUNTER_RESERVE`); if the remaining count cannot be read, the lookup is refused;
+4. a persistent monthly counter in Postgres, capped at 40 (`HUNTER_MONTHLY_CAP`).
+
+Credits are Hunter's own accounting; the numbers shown to the owner come from Hunter's account endpoint.
+
+**Manual review.** A manual-review card lists exactly what is missing (certifications, funding stage, SaaS status). The reviewer can add a contact and get a draft clearly labelled "MANUAL-REVIEW DRAFT". That never changes the decision, and a skipped company cannot be drafted at all. All send guards (owner-inbox allowlist, one send per company, daily cap) still apply.
+
+**Research depth.** Besides pages linked from the homepage, the research loop probes conventional paths: security (`/security`, `/trust`, `/trust-center`, `/compliance`, `trust.<domain>`...), legal, about, careers/jobs, press/blog, pricing. Up to 3 loops, 4 URLs per loop, 12 extra fetch attempts and 6 extra pages per company. If no security or trust page exists at any probed path, the company can still be a fit, flagged `certs_unverified_no_security_page` with the plain-language note that absence of evidence is not proof.
 
 ## Layout
 

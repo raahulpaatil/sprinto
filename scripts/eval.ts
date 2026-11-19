@@ -628,6 +628,18 @@ async function main() {
     check("a skipped company cannot be drafted for at all", sk.c.decision.result === "skip" && !sk.c.draft && sk.c.status === "error", `${sk.c.decision.result} draft=${!!sk.c.draft}`, true);
   }
 
+  // 19. contact ranking
+  current = "19 contact ranking";
+  {
+    const e = (position: string, first = "Ann", last = "Lee", confidence = 90) => ({ value: `${first.toLowerCase()}@x.test`, first_name: first, last_name: last, position, confidence });
+    check("a Sales Director is NOT picked (cto must not match inside Director)", !rankContacts([e("Sales Director")]).contact, JSON.stringify(rankContacts([e("Sales Director")]).contact), true);
+    check("Director of Marketing / Account Executive / Sales Manager are not picked", !rankContacts([e("Director of Marketing"), e("Account Executive"), e("Sales Manager"), e("Customer Success Director")]).contact);
+    check("Head of Security is picked over a CTO and a founder", rankContacts([e("CTO"), e("Founder"), e("Head of Security", "Sam", "Roy")]).contact?.name === "Sam Roy");
+    check("CTO and VP Engineering are picked", rankContacts([e("CTO")]).contact?.role === "CTO" && !!rankContacts([e("VP of Engineering")]).contact);
+    check("Co-founder and CEO are picked", !!rankContacts([e("Co-Founder & CEO")]).contact);
+    check("a person without a full name or role is never picked", !rankContacts([{ value: "a@x.test", first_name: "Ann", last_name: null, position: "CTO" }, { value: "b@x.test", first_name: "Bo", last_name: "Li", position: null }]).contact);
+  }
+
   // utilities
   current = "13 utility guards";
   {

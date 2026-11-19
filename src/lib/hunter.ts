@@ -24,11 +24,12 @@ interface HunterEmail {
   verification?: { status?: string | null } | null;
 }
 
+// Word boundaries matter: "cto" must not match inside "Director", "it" inside "Sales", etc.
 const TIERS: { re: RegExp; score: number; why: string }[] = [
-  { re: /(compliance|grc|governance|risk|ciso|chief information security|information security|head of security|security (lead|manager|director|engineer)|vp.*security|head of trust|trust)/i, score: 100, why: "owns compliance / security" },
-  { re: /(cto|chief technology|vp.*engineering|head of engineering|engineering (director|manager|lead)|director.*engineering|vp of eng)/i, score: 80, why: "engineering leadership" },
-  { re: /(founder|co-founder|cofounder|ceo|chief executive)/i, score: 70, why: "founder / CEO" },
-  { re: /(coo|chief operating|head of (it|operations)|it (director|manager))/i, score: 50, why: "operations / IT leadership" },
+  { re: /\b(compliance|grc|governance|ciso|chief information security officer|information security|infosec|head of security|security (lead|manager|director|engineer|officer|architect)|vp,? (of )?security|head of trust|trust (lead|manager|director))\b/i, score: 100, why: "owns compliance / security" },
+  { re: /\b(cto|chief technology officer|vp,? (of )?engineering|head of engineering|engineering (director|manager|lead)|director,? (of )?engineering|vp eng)\b/i, score: 80, why: "engineering leadership" },
+  { re: /\b(founder|co-?founder|ceo|chief executive officer)\b/i, score: 70, why: "founder / CEO" },
+  { re: /\b(coo|chief operating officer|head of (it|operations)|it (director|manager))\b/i, score: 50, why: "operations / IT leadership" },
 ];
 
 export function rankContacts(emails: HunterEmail[]): { contact?: Contact; reason: string } {
