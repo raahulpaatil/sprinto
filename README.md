@@ -4,6 +4,16 @@ Cold-outreach research assistant for Sprinto's Growth Lead (Mesa Term 2, AI Case
 
 **Safety first:** the only email destination the app can ever use is `rahulmp458@gmail.com` (the owner's own inbox). Nothing is ever sent to a prospect. Facts are never invented: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
 
+**Live app:** <https://sprinto-seven.vercel.app> (public, no login)
+
+## Status
+
+Working end to end on the live app: scrape, extract, qualify (with the research loop), decision with reasons, the evidence table, and the draft and send guards. Waiting on three one-time steps by the owner:
+
+1. **Gmail connection:** needs a Google sign-in and consent (see Gmail setup). Until then drafts are shown and the send result reads "not configured".
+2. **Hunter API key:** until `HUNTER_API_KEY` is set, a qualified company records "contact skipped". A real contact can be typed in on the company card, or given up front as `domain | name | contact name | contact role`.
+3. **Durable storage on Vercel:** accept the Neon marketplace terms, then run `vercel integration add neon --name sprinto-db` in this folder. Until then the hosted app keeps records in `/tmp` (not durable), the page still works because it carries each company's setup with every request, and sends are verified against Gmail before any retry.
+
 ## Pipeline (per company domain)
 
 0. **Discover (optional):** suggests candidate domains from the ICP. These come from the model's memory, are labelled unverified, and every one still goes through the full pipeline.
