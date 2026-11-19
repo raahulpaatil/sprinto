@@ -1,7 +1,7 @@
 // Live smoke test: real websites + real Gemini. Hunter/Gmail run only if their env vars are set.
 //   npm run smoke -- linear.app pizzahut.com
 import { MemoryStore } from "../src/lib/store";
-import { liveDeps, newCompany, processCompany } from "../src/lib/pipeline";
+import { continueWithContact, liveDeps, newCompany, processCompany } from "../src/lib/pipeline";
 
 async function main() {
   const domains = process.argv.slice(2).filter((a) => !a.startsWith("-"));
@@ -11,10 +11,13 @@ async function main() {
     const t0 = Date.now();
     const [hn, hr] = (process.env.SMOKE_HINT ?? "").split("|");
     const c = newCompany("smoke", `smoke-${d}`, d, true, new Date(), undefined, hn && hr ? { name: hn, role: hr } : undefined);
+    c.sendEnabled = false; // smoke runs never send
     await processCompany(c, deps);
+    if (process.env.SMOKE_OVERRIDE && c.decision.result === "manual_review") await continueWithContact(c, { name: "Test Person", role: "Head of Security" }, deps);
     console.log(`\n=== ${d} (${((Date.now() - t0) / 1000).toFixed(1)}s) status=${c.status} decision=${c.decision.result}`);
     if (c.error) console.log("ERROR:", c.error);
     console.log("reasons:", c.decision.reasons.join(" | "));
+    if (c.decision.result === "manual_review") for (const r of c.decision.reasons) console.log("  reason:", r.slice(0, 400));
     console.log("flags:", c.decision.flags.join(", "), "| loops:", `${c.research.loops}/${c.research.cap}`, "| pages:", c.pages.map((p) => `${p.kind}${p.ok ? "" : "(x)"}`).join(","));
     const f = c.facts;
     if (f) {

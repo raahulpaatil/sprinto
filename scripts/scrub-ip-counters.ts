@@ -8,8 +8,9 @@ import { getStore, SqlStore } from "../src/lib/store";
 async function main() {
   const store = getStore();
   if (!(store instanceof SqlStore)) throw new Error("expected a SQL store");
+  const T = store.kind === "postgres" ? "sprinto.counters" : "counters";
   const hour = new Date().toISOString().slice(0, 13);
-  const rows = await store.rawExec("SELECT k, n FROM counters");
+  const rows = await store.rawExec(`SELECT k, n FROM ${T}`);
   const ip = /^(runs:h|discover:h|gmailstart|ownerlogin:h):(\d{4}-\d{2}-\d{2}T\d{2}):(\d{1,3}(?:\.\d{1,3}){3})$/;
   let rekeyed = 0, deleted = 0;
   for (const r of rows) {
@@ -20,9 +21,9 @@ async function main() {
       await store.hit(`${prefix}:${h}:${hashIp(raw)}`, Number(r.n)); // keeps the live window's count under the hashed key
       rekeyed++;
     } else deleted++;
-    await store.rawExec("DELETE FROM counters WHERE k = ?", [String(r.k)]);
+    await store.rawExec(`DELETE FROM ${T} WHERE k = ?`, [String(r.k)]);
   }
-  const left = (await store.rawExec("SELECT k FROM counters")).filter((r) => /\d+\.\d+\.\d+\.\d+/.test(String(r.k))).length;
+  const left = (await store.rawExec(`SELECT k FROM ${T}`)).filter((r) => /\d+\.\d+\.\d+\.\d+/.test(String(r.k))).length;
   console.log(`re-keyed (current hour) ${rekeyed}, deleted (past hours) ${deleted}, rows still embedding an IPv4: ${left}`);
 }
 main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
