@@ -39,7 +39,6 @@ export async function GET(req: Request) {
       allowance: await publicAllowance(store, clientIp(req)),
       caps: {
         runsPerIpPerHour: limits.runsPerIpPerHour,
-        runsGlobalPerDay: limits.runsGlobalPerDay,
         companiesGlobalPerDay: limits.companiesGlobalPerDay,
         discoverPerIpPerHour: limits.discoverPerIpPerHour,
         discoverGlobalPerDay: limits.discoverGlobalPerDay,
@@ -50,7 +49,6 @@ export async function GET(req: Request) {
         sendsGlobalPerDay: Number(process.env.SENDS_GLOBAL_PER_DAY || 25),
       },
       usageToday: {
-        runs: await store.hit(`runs:d:${day}:all`, 0),
         companies: await store.hit(`companies:d:${day}:all`, 0),
         geminiCalls: await store.hit(`gemini:d:${day}`, 0),
         sends: await store.hit(`sends:d:${day}`, 0),

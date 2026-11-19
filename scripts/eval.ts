@@ -436,16 +436,21 @@ async function main() {
     check("next run in the hour is blocked with a retry time", !sixth.ok && (sixth.retryAfterSec ?? 0) > 0 && /per hour/.test(sixth.reason ?? ""), JSON.stringify(sixth));
     check("a different IP is unaffected", (await allowRun(store, "2.2.2.2", t)).ok);
     check("limit resets next hour", (await allowRun(store, "1.1.1.1", new Date("2026-11-19T11:00:05Z"))).ok);
-    // global daily cap of 20, spread over many IPs so the per-IP limit never trips
+    // there is no site-wide daily run cap: many visitors (distinct IPs) can each run, and an 11th+ run in a day is not refused
     const g = new MemoryStore();
     let allowed = 0;
-    let blockedGlobal: { ok: boolean; reason?: string } = { ok: true };
-    for (let i = 0; i < 25; i++) {
-      const r = await allowRun(g, `10.0.0.${i}`, t);
-      if (r.ok) allowed++; else blockedGlobal = r;
+    for (let i = 0; i < 25; i++) if ((await allowRun(g, `10.0.0.${i}`, t)).ok) allowed++;
+    check("no site-wide daily run cap: 25 runs from 25 visitors in one day are all allowed", allowed === 25, `allowed=${allowed}`, true);
+    check("the run limiter writes no daily run counter", ![...g.counters.keys()].some((k) => k.startsWith("runs:d:")), [...g.counters.keys()].join(","), true);
+    // one visitor across several hours of the same day: only the hourly limit applies
+    const h = new MemoryStore();
+    const byHour: boolean[][] = [];
+    for (const hr of ["08", "09", "10", "11"]) {
+      const row: boolean[] = [];
+      for (let i = 0; i < 4; i++) row.push((await allowRun(h, "4.4.4.4", new Date(`2026-11-19T${hr}:20:00Z`))).ok);
+      byHour.push(row);
     }
-    check("global daily cap of 10 holds with a clean message", allowed === limits.runsGlobalPerDay && limits.runsGlobalPerDay === 10 && /Daily demo limit reached.*tomorrow/.test(blockedGlobal.reason ?? ""), `allowed=${allowed} ${blockedGlobal.reason}`);
-    check("global cap resets next day", (await allowRun(g, "10.9.9.9", new Date("2026-11-20T00:00:05Z"))).ok);
+    check("one visitor gets 3 runs every hour (12 in a day), the 4th in each hour is refused", byHour.every((r) => r.slice(0, 3).every(Boolean) && !r[3]), JSON.stringify(byHour), true);
     const d = new MemoryStore();
     const dres = [];
     for (let i = 0; i < 4; i++) dres.push((await allowDiscover(d, "3.3.3.3", t)).ok);
@@ -639,14 +644,21 @@ async function main() {
     check("one IP gets exactly 3 runs an hour, the 4th is refused", res.slice(0, 3).every(Boolean) && !res[3], JSON.stringify(res), true);
     const g = new MemoryStore();
     let allowed = 0;
-    let last: { ok: boolean; reason?: string } = { ok: true };
-    for (let i = 0; i < 14; i++) { const r = await gateRun(g, { ip: `ip_${i}`, companies: 1, now: t }); if (r.ok) allowed++; else last = r; }
-    check("site-wide, exactly 10 runs a day are allowed, then the clean limit message", allowed === 10 && /Daily demo limit reached.*tomorrow/.test(last.reason ?? ""), `${allowed} ${last.reason}`, true);
+    for (let i = 0; i < 11; i++) if ((await gateRun(g, { ip: `ip_${i}`, companies: 1, now: t })).ok) allowed++;
+    check("an 11th run in a day is NOT blocked by a daily run cap (11 visitors, 1 company each, all allowed)", allowed === 11, String(allowed), true);
+    const eleventhSameIp: boolean[] = [];
+    for (let i = 0; i < 4; i++) eleventhSameIp.push((await gateRun(g, { ip: "ip_0", companies: 1, now: t })).ok);
+    check("after 11 runs today, the hourly per-IP limit still blocks (ip_0 had 1, gets 2 more, then refused)", eleventhSameIp[0] && eleventhSameIp[1] && !eleventhSameIp[2] && !eleventhSameIp[3], JSON.stringify(eleventhSameIp), true);
+    const c = new MemoryStore();
+    let cAllowed = 0;
+    let cLast: { ok: boolean; reason?: string } = { ok: true };
+    for (let i = 0; i < 6; i++) { const r = await gateRun(c, { ip: `ip_c${i}`, companies: 10, now: t }); if (r.ok) cAllowed++; else cLast = r; }
+    check("the 40 companies/day budget still applies across visitors", cAllowed === 4 && /Daily demo limit reached \(40 companies per day/.test(cLast.reason ?? ""), `${cAllowed} ${cLast.reason}`, true);
     check("there is no separate owner counter: nothing is ever written under runs:owner", [...st.counters.keys(), ...g.counters.keys()].every((k) => !k.startsWith("runs:owner")), [...g.counters.keys()].join(","), true);
-    check("a run consumes the shared run, per-IP and companies counters", (await st.hit(`runs:d:${day}:all`, 0)) === 3 && (await st.hit(`companies:d:${day}:all`, 0)) === 6, `${await st.hit(`runs:d:${day}:all`, 0)}`);
+    check("a run consumes the per-IP hourly and companies counters, and no daily run counter", (await st.hit(`runs:h:2026-11-19T10:ip_a`, 0)) === 4 && (await st.hit(`companies:d:${day}:all`, 0)) === 6 && ![...st.counters.keys()].some((k) => k.startsWith("runs:d:")), [...st.counters.keys()].join(","));
     const a = await publicAllowance(g, "ip_x", t);
-    check("the page shows honest remaining limits and reset times", a.runsLeftToday === 0 && a.dailyResetsAtUtc === "2026-11-20T00:00:00.000Z" && a.hourlyResetsAtUtc === "2026-11-19T11:00:00.000Z", JSON.stringify(a));
-    check("nothing is unlimited: caps are 3/hour per IP, 10/day, 40 companies/day", limits.runsPerIpPerHour === 3 && limits.runsGlobalPerDay === 10 && limits.companiesGlobalPerDay === 40);
+    check("the page shows honest remaining limits and reset times, with no daily run fields", !("runsLeftToday" in a) && !("runsDailyCap" in a) && a.runsLeftThisHourForYou === 3 && a.companiesLeftToday === 27 && a.dailyResetsAtUtc === "2026-11-20T00:00:00.000Z" && a.hourlyResetsAtUtc === "2026-11-19T11:00:00.000Z", JSON.stringify(a));
+    check("remaining caps: 3 runs/hour per IP, 40 companies/day; no site-wide daily run cap", limits.runsPerIpPerHour === 3 && limits.companiesGlobalPerDay === 40 && !("runsGlobalPerDay" in limits));
   }
 
   // 22. certification ambiguity
@@ -723,10 +735,11 @@ async function main() {
     check("limiter counter keys contain no raw IP address", [...ms.counters.keys()].every((k) => !/\d+\.\d+\.\d+\.\d+/.test(k)), [...ms.counters.keys()].join(","), true);
     delete process.env.IP_HASH_SALT;
     // retention on a real SQL store: old rows pruned, live windows and Hunter keys kept
-    const file = `/private/tmp/claude-501/sprinto-logs/retention-${Date.now()}.db`;
+    const { tmpdir } = await import("node:os");
+    const file = `${tmpdir()}/sprinto-retention-${Date.now()}.db`;
     const sql = makeSqliteStore(file);
     const day = new Date().toISOString().slice(0, 10), hr = new Date().toISOString().slice(0, 13);
-    await sql.hit(`runs:d:${day}:all`, 3); // live daily window
+    await sql.hit(`companies:d:${day}:all`, 3); // live daily window
     await sql.hit(`runs:h:${hr}:ip_live`, 2); // live hourly window
     await sql.hit("runs:h:2026-11-10T08:ip_old", 1);
     await sql.hit("gemini:d:2026-11-10", 5);
@@ -737,7 +750,7 @@ async function main() {
     await sql.hit("trigger:write", 1);
     const left = (await sql.rawExec("SELECT k, n FROM counters ORDER BY k")).map((r) => `${r.k}=${r.n}`);
     check("rows idle over 48h are pruned on write", !left.some((k) => k.startsWith("runs:h:2026-11-10") || k.startsWith("gemini:d:2026-11-10")), left.join(","), true);
-    check("live daily and hourly windows are untouched (values preserved)", left.includes(`runs:d:${day}:all=3`) && left.includes(`runs:h:${hr}:ip_live=2`), left.join(","), true);
+    check("live daily and hourly windows are untouched (values preserved)", left.includes(`companies:d:${day}:all=3`) && left.includes(`runs:h:${hr}:ip_live=2`), left.join(","), true);
     check("Hunter month key is exempt from pruning", left.includes("hunter:m:2026-10=7"), left.join(","), true);
     const { rmSync } = await import("node:fs");
     rmSync(file, { force: true });

@@ -81,7 +81,6 @@ There is no in-app Gmail connect or relink (`/api/gmail/start` and `/api/gmail/c
 | Cap | Default | Env override |
 |---|---|---|
 | Research runs per visitor IP per hour | 3 | `RUNS_PER_IP_PER_HOUR` |
-| Research runs per day, all visitors | 10 | `RUNS_GLOBAL_PER_DAY` |
 | Companies per day, all visitors | 40 | `COMPANIES_GLOBAL_PER_DAY` |
 | Domains per run | 10 | fixed |
 | Discovery requests per IP per hour / per day overall | 3 / 10 | `DISCOVER_PER_IP_PER_HOUR`, `DISCOVER_GLOBAL_PER_DAY` |

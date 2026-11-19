@@ -22,7 +22,7 @@ function parseLines(input: unknown): { domain: string; name?: string; contactNam
   return out;
 }
 
-/** No sign-in. One shared set of limits (per IP per hour, site-wide per day) protects the free-tier quotas. */
+/** No sign-in. One shared set of limits (runs per IP per hour, shared daily company/AI/send budgets) protects the free-tier quotas. */
 export async function POST(req: Request) {
   const deps = liveDeps();
   let body: { domains?: unknown; send?: unknown; mode?: unknown };

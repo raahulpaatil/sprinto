@@ -12,7 +12,6 @@ const num = (v: string | undefined, d: number) => {
 export const limits = {
   get maxDomainsPerRun() { return 10; },
   get runsPerIpPerHour() { return num(process.env.RUNS_PER_IP_PER_HOUR, 3); },
-  get runsGlobalPerDay() { return num(process.env.RUNS_GLOBAL_PER_DAY, 10); },
   get companiesGlobalPerDay() { return num(process.env.COMPANIES_GLOBAL_PER_DAY, 40); },
   get discoverPerIpPerHour() { return num(process.env.DISCOVER_PER_IP_PER_HOUR, 3); },
   get discoverGlobalPerDay() { return num(process.env.DISCOVER_GLOBAL_PER_DAY, 10); },
@@ -53,6 +52,14 @@ function secondsToNextDay(d: Date) {
   return 86400 - (d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds());
 }
 
+async function perIpHourly(store: Store, kind: string, ip: string, perIpHour: number, noun: string, now: Date): Promise<Gate> {
+  const perIp = await store.hit(`${kind}:h:${hourKey(now)}:${ip}`, 1);
+  if (perIp > perIpHour) {
+    return { ok: false, retryAfterSec: secondsToNextHour(now), reason: `Rate limit: ${perIpHour} ${noun} per hour per visitor. Try again in about ${Math.ceil(secondsToNextHour(now) / 60)} minutes.` };
+  }
+  return { ok: true };
+}
+
 async function twoLevel(
   store: Store,
   kind: string,
@@ -62,10 +69,8 @@ async function twoLevel(
   noun: string,
   now: Date,
 ): Promise<Gate> {
-  const perIp = await store.hit(`${kind}:h:${hourKey(now)}:${ip}`, 1);
-  if (perIp > perIpHour) {
-    return { ok: false, retryAfterSec: secondsToNextHour(now), reason: `Rate limit: ${perIpHour} ${noun} per hour per visitor. Try again in about ${Math.ceil(secondsToNextHour(now) / 60)} minutes.` };
-  }
+  const g0 = await perIpHourly(store, kind, ip, perIpHour, noun, now);
+  if (!g0.ok) return g0;
   const g = await store.hit(`${kind}:d:${dayKey(now)}:all`, 1);
   if (g > globalDay) {
     return { ok: false, retryAfterSec: secondsToNextDay(now), reason: `Daily demo limit reached (${globalDay} ${noun} per day across all visitors). Please try again tomorrow.` };
@@ -73,8 +78,9 @@ async function twoLevel(
   return { ok: true };
 }
 
+/** Research runs are limited per visitor per hour only; the shared company, AI, Hunter and send budgets still apply. */
 export function allowRun(store: Store, ip: string, now = new Date()) {
-  return twoLevel(store, "runs", ip, limits.runsPerIpPerHour, limits.runsGlobalPerDay, "research runs", now);
+  return perIpHourly(store, "runs", ip, limits.runsPerIpPerHour, "research runs", now);
 }
 
 export function allowDiscover(store: Store, ip: string, now = new Date()) {
@@ -86,7 +92,7 @@ export async function allowAttempt(store: Store, kind: string, id: string, max: 
   return (await store.hit(`attempt:${kind}:${id}`, 1)) <= max;
 }
 
-/** Public runs also share a daily company budget, so ten large runs cannot exceed the free AI quota. */
+/** Public runs also share a daily company budget, so large runs cannot exceed the free AI quota. */
 export async function allowCompaniesToday(store: Store, n: number, now = new Date()): Promise<Gate> {
   const total = await store.hit(`companies:d:${dayKey(now)}:all`, n);
   return total > limits.companiesGlobalPerDay
@@ -104,14 +110,11 @@ export async function gateRun(store: Store, opts: { ip: string; companies: numbe
 
 /** What is left of the shared budgets today. Reads counters without incrementing them. */
 export async function publicAllowance(store: Store, ip: string, now = new Date()) {
-  const usedGlobal = await store.hit(`runs:d:${dayKey(now)}:all`, 0);
   const usedIp = await store.hit(`runs:h:${hourKey(now)}:${ip}`, 0);
   const usedCompanies = await store.hit(`companies:d:${dayKey(now)}:all`, 0);
   const nextDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
   const nextHour = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours() + 1)).toISOString();
   return {
-    runsLeftToday: Math.max(0, limits.runsGlobalPerDay - usedGlobal),
-    runsDailyCap: limits.runsGlobalPerDay,
     runsLeftThisHourForYou: Math.max(0, limits.runsPerIpPerHour - usedIp),
     runsHourlyCap: limits.runsPerIpPerHour,
     companiesLeftToday: Math.max(0, limits.companiesGlobalPerDay - usedCompanies),
