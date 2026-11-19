@@ -7,17 +7,22 @@ import type { RunRecord } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-/** Accepts lines like "acme.com" or "acme.com | Acme Inc" (the optional name guards against same-name look-alikes). */
-function parseLines(input: unknown): { domain: string; name?: string }[] {
+/** Lines: "acme.com" | "acme.com | Acme Inc" (name guards against look-alikes) | "acme.com | Acme Inc | Jane Doe | Head of Security" (fallback contact). */
+function parseLines(input: unknown): { domain: string; name?: string; contactName?: string; contactRole?: string }[] {
   const lines = Array.isArray(input) ? input.map(String) : typeof input === "string" ? input.split(/\r?\n|,(?=\s*[a-z0-9-]+\.)/i) : [];
-  const out: { domain: string; name?: string }[] = [];
+  const out: { domain: string; name?: string; contactName?: string; contactRole?: string }[] = [];
   const seen = new Set<string>();
   for (const line of lines) {
-    const [d, n] = line.split("|");
+    const [d, n, cn, cr] = line.split("|");
     const domain = normalizeDomain(d ?? "");
     if (!domain || seen.has(domain)) continue;
     seen.add(domain);
-    out.push({ domain, name: n?.trim().slice(0, 80) || undefined });
+    out.push({
+      domain,
+      name: n?.trim().slice(0, 80) || undefined,
+      contactName: cn?.trim().slice(0, 80) || undefined,
+      contactRole: cr?.trim().slice(0, 100) || undefined,
+    });
   }
   return out;
 }
@@ -53,7 +58,7 @@ export async function POST(req: Request) {
     companyIds: [],
     createdAt: now.toISOString(),
   };
-  const companies = parsed.map((p, i) => newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name));
+  const companies = parsed.map((p, i) => newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name, p.contactName && p.contactRole ? { name: p.contactName, role: p.contactRole } : undefined));
   run.companyIds = companies.map((c) => c.id);
   await deps.store.saveRun(run);
   for (const c of companies) await deps.store.saveCompany(c);

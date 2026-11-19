@@ -71,11 +71,12 @@ export function qualify(f: CompanyFacts, ctx: QualifyCtx): Qualification {
   }
 
   // Required fields for a confident "fit".
+  // Order = research priority: SaaS and certification checks can end the search outright, stage rarely can.
   if (f.is_b2b_saas.value === null) missing.push("saas");
-  const hasStageEvidence = !!stage || proxies.filter((p) => !p.startsWith("named")).length >= 2;
-  if (!hasStageEvidence) missing.push("stage");
   const securityChecked = ctx.fetchedKinds.includes("security");
   if (!securityChecked && f.certifications.length === 0) missing.push("certs");
+  const hasStageEvidence = !!stage || proxies.filter((p) => !p.startsWith("named")).length >= 2;
+  if (!hasStageEvidence) missing.push("stage");
 
   if (missing.length > 0) {
     if (!ctx.exhausted) return done("needs_research");

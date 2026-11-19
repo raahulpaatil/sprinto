@@ -277,7 +277,9 @@ export default function Home() {
   async function processOne(c: CompanyRecord) {
     patch({ ...c, status: "running", stage: "starting" });
     try {
-      const r = await api<{ company: CompanyRecord }>(`/api/companies/${c.id}/process`, {});
+      const r = await api<{ company: CompanyRecord }>(`/api/companies/${c.id}/process`, {
+        skeleton: { runId: c.runId, domain: c.domain, expectedName: c.expectedName, sendEnabled: c.sendEnabled, hintContact: c.hintContact },
+      });
       patch(r.company);
     } catch (e) {
       patch({ ...c, status: "error", error: e instanceof Error ? e.message : "Failed" });
@@ -391,7 +393,7 @@ export default function Home() {
               aria-label="Company domains"
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder={"One domain per line (max 10):\nacme.com\nanother.io | Another Inc   <- optional expected name guards against same-name look-alikes"}
+              placeholder={"One domain per line (max 10):\nacme.com\nanother.io | Another Inc\nthird.com | Third Inc | Jane Doe | Head of Security\n\nOptional 2nd field = expected name (guards against same-name look-alikes).\nOptional 3rd and 4th = a real contact to use if Hunter finds nobody."}
             />
             <label className="row">
               <input type="checkbox" checked={send} onChange={(e) => setSend(e.target.checked)} />

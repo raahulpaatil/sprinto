@@ -9,7 +9,8 @@ async function main() {
   const deps = { ...liveDeps(), store: new MemoryStore() };
   for (const d of domains) {
     const t0 = Date.now();
-    const c = newCompany("smoke", `smoke-${d}`, d, true, new Date());
+    const [hn, hr] = (process.env.SMOKE_HINT ?? "").split("|");
+    const c = newCompany("smoke", `smoke-${d}`, d, true, new Date(), undefined, hn && hr ? { name: hn, role: hr } : undefined);
     await processCompany(c, deps);
     console.log(`\n=== ${d} (${((Date.now() - t0) / 1000).toFixed(1)}s) status=${c.status} decision=${c.decision.result}`);
     if (c.error) console.log("ERROR:", c.error);
@@ -22,7 +23,11 @@ async function main() {
     }
     if (c.droppedClaims.length) console.log("dropped:", c.droppedClaims.length);
     console.log("contact:", c.contact ? `${c.contact.name} (${c.contact.role})` : c.contactSkip ?? "-");
-    if (c.draft) console.log("draft:", c.draft.status, "| hook grounded:", c.draft.hookGrounded, "| send:", c.send?.status);
+    if (c.draft) {
+      console.log("draft:", c.draft.status, "| hook grounded:", c.draft.hookGrounded, "| send:", c.send?.status, "| problems:", c.draft.problems.join(" ") || "none");
+      console.log("subject:", c.draft.subject, "\n" + c.draft.body, "\nhook quote:", c.draft.hookEvidence.quote);
+      for (const p of c.pains ?? []) console.log("pain:", p.pain, "| grounded:", p.grounded, "|", p.evidence.quote.slice(0, 100));
+    }
   }
 }
 main().catch((e) => {

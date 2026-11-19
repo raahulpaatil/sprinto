@@ -146,6 +146,8 @@ export interface CompanyRecord {
   runId: string;
   domain: string;
   expectedName?: string;
+  /** Contact the user typed in up front; used only when Hunter finds nobody. */
+  hintContact?: { name: string; role: string };
   sendEnabled: boolean;
   status: CompanyStatus;
   stage: string;

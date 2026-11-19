@@ -27,13 +27,14 @@ export function liveDeps(): Deps {
   return { fetcher: realFetch, llm: geminiLLM, contacts: hunterContacts, mailer: gmailMailer, store: getStore(), now: () => new Date() };
 }
 
-export function newCompany(runId: string, id: string, domain: string, sendEnabled: boolean, now: Date, expectedName?: string): CompanyRecord {
+export function newCompany(runId: string, id: string, domain: string, sendEnabled: boolean, now: Date, expectedName?: string, hintContact?: { name: string; role: string }): CompanyRecord {
   const t = now.toISOString();
   return {
     id,
     runId,
     domain,
     expectedName: expectedName || undefined,
+    hintContact: hintContact?.name && hintContact?.role ? { name: hintContact.name.slice(0, 80), role: hintContact.role.slice(0, 100) } : undefined,
     sendEnabled,
     status: "queued",
     stage: "queued",
@@ -190,7 +191,9 @@ async function runCore(c: CompanyRecord, deps: Deps) {
       q = qualify(c.facts as CompanyFacts, ctx(true));
       break;
     }
-    const field = q.missing[0];
+    // Round-robin across missing fields so one stubborn field cannot eat the whole budget.
+    const tried = (f: string) => c.research.steps.filter((s) => s.field === f).length;
+    const field = [...q.missing].sort((a, b) => tried(a) - tried(b))[0];
     let url: string | null = null;
     let kind: PageKind | null = null;
     for (const k of pageKindsFor(field)) {
@@ -230,6 +233,9 @@ async function runCore(c: CompanyRecord, deps: Deps) {
   if (found.contact) {
     c.contact = found.contact;
     note(c, deps, "contact", `Selected ${found.contact.name}, ${found.contact.role} (${found.contact.why}).`);
+  } else if (c.hintContact) {
+    c.contact = { name: c.hintContact.name, role: c.hintContact.role, source: "manual", why: "Supplied by you (Hunter had no result)" };
+    note(c, deps, "contact", `Hunter skipped (${found.skip ?? "no result"}); using the contact you supplied: ${c.contact.name}, ${c.contact.role}.`);
   } else {
     c.contactSkip = found.skip ?? "No suitable contact found.";
     note(c, deps, "contact", `Skipped: ${c.contactSkip}`);

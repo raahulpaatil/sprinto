@@ -379,6 +379,16 @@ async function main() {
     await Promise.all([sendPreview(b3), sendPreview(b3), sendPreview(b3)]);
     check("three concurrent sends deliver exactly once", m3.deliveries.length === 1, String(m3.deliveries.length), true);
     check("token is deterministic per company", tokenFor("dup-3") === tokenFor("dup-3"));
+
+    // Non-durable storage (serverless without a database): Gmail itself must prevent the duplicate.
+    const m4 = mailerFake();
+    const inst = () => ({ companyId: "dup-4", to: OWNER_EMAIL, subject: "s", text: "t", store: new MemoryStore(false), mailer: m4 });
+    const a = await sendPreview(inst()); // "instance 1"
+    const b = await sendPreview(inst()); // "instance 2" has no memory of instance 1
+    check("non-durable storage: second instance does not resend (Gmail checked first)", a.status === "sent" && b.status === "duplicate_prevented" && m4.deliveries.length === 1, `${a.status}/${b.status} deliveries=${m4.deliveries.length}`, true);
+    const m5 = mailerFake({ findResult: "unverifiable" });
+    const c5 = await sendPreview({ companyId: "dup-5", to: OWNER_EMAIL, subject: "s", text: "t", store: new MemoryStore(false), mailer: m5 });
+    check("non-durable storage + Gmail unverifiable: refuses to send at all", c5.status === "unknown" && m5.deliveries.length === 0, `${c5.status} deliveries=${m5.deliveries.length}`, true);
   }
 
   // 12. fabricated claim

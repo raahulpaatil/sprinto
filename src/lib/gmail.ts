@@ -167,6 +167,16 @@ export async function sendPreview(opts: {
   const token = tokenFor(opts.companyId);
   const msg: OutboundMessage = { to, subject: `[Sprinto preview ${token}] ${opts.subject}`.slice(0, 200), text: opts.text, token };
 
+  if (!opts.store.durable) {
+    // The lock row cannot be trusted across serverless instances, so Gmail itself is the source of truth.
+    const pre = await opts.mailer.findByToken(token);
+    if (pre === "unverifiable") {
+      return { status: "unknown", to, note: "Storage is not durable and Gmail cannot confirm whether this was already sent (read access missing). Not sending, to avoid a duplicate.", at: at() };
+    }
+    if (pre.found) {
+      return { status: "duplicate_prevented", to, messageId: pre.messageId, note: "Gmail already has a message for this company. Not sending again.", at: at() };
+    }
+  }
   const claim = await opts.store.claimSend(key, opts.companyId);
   if (!claim.claimed) {
     const ex = claim.existing;

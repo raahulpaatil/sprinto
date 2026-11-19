@@ -34,7 +34,8 @@ export interface Store {
 // ---------- in-memory store (tests / eval) ----------
 export class MemoryStore implements Store {
   kind = "memory";
-  durable = false;
+  /** Tests pass false to simulate a serverless instance whose local state cannot be trusted. */
+  constructor(public durable = true) {}
   runs = new Map<string, RunRecord>();
   companies = new Map<string, CompanyRecord>();
   sends = new Map<string, SendLockRow>();
