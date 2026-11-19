@@ -110,6 +110,8 @@ export interface Draft {
   hookEvidence: Evidence;
   hookGrounded: boolean;
   uncertainFields: string[];
+  /** Set when the company is still a manual-review case: the draft is explicitly labelled and the decision is unchanged. */
+  label?: "manual_review";
   problems: string[];
   status: "ready" | "needs_review" | "ungrounded";
 }
@@ -176,6 +178,8 @@ export interface RunRecord {
   companyIds: string[];
   createdAt: string;
   note?: string;
-  /** Always the authenticated owner: visitors cannot create runs. */
+  /** Created by the signed-in owner (private: readable only with the owner session). */
   owner?: boolean;
+  /** Created by a public visitor. Only public runs are readable without the owner session, and only by their unguessable id. */
+  public?: boolean;
 }

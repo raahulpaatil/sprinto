@@ -10,10 +10,11 @@ const num = (v: string | undefined, d: number) => {
 
 export const limits = {
   get maxDomainsPerRun() { return 10; },
-  get runsPerIpPerHour() { return num(process.env.RUNS_PER_IP_PER_HOUR, 5); },
-  get runsGlobalPerDay() { return num(process.env.RUNS_GLOBAL_PER_DAY, 20); },
-  get discoverPerIpPerHour() { return num(process.env.DISCOVER_PER_IP_PER_HOUR, 5); },
-  get discoverGlobalPerDay() { return num(process.env.DISCOVER_GLOBAL_PER_DAY, 20); },
+  get runsPerIpPerHour() { return num(process.env.RUNS_PER_IP_PER_HOUR, 3); },
+  get runsGlobalPerDay() { return num(process.env.RUNS_GLOBAL_PER_DAY, 10); },
+  get companiesGlobalPerDay() { return num(process.env.COMPANIES_GLOBAL_PER_DAY, 40); },
+  get discoverPerIpPerHour() { return num(process.env.DISCOVER_PER_IP_PER_HOUR, 3); },
+  get discoverGlobalPerDay() { return num(process.env.DISCOVER_GLOBAL_PER_DAY, 10); },
   get maxDiscoveryResults() { return 5; },
   /** Per-company caps so one record cannot be used to burn model calls. */
   processAttempts: 3,
@@ -60,7 +61,7 @@ async function twoLevel(
   }
   const g = await store.hit(`${kind}:d:${dayKey(now)}:all`, 1);
   if (g > globalDay) {
-    return { ok: false, retryAfterSec: secondsToNextDay(now), reason: `This demo has reached its daily capacity (${globalDay} ${noun} per day). Please try again tomorrow.` };
+    return { ok: false, retryAfterSec: secondsToNextDay(now), reason: `Daily demo limit reached (${globalDay} ${noun} per day across all visitors). Please try again tomorrow.` };
   }
   return { ok: true };
 }
@@ -82,4 +83,18 @@ export async function allowAttempt(store: Store, kind: string, id: string, max: 
 export async function allowOwnerLogin(store: Store, ip: string, now = new Date()): Promise<Gate> {
   const n = await store.hit(`ownerlogin:h:${hourKey(now)}:${ip}`, 1);
   return n > 8 ? { ok: false, retryAfterSec: secondsToNextHour(now), reason: "Too many attempts. Try again later." } : { ok: true };
+}
+
+/** Public runs also share a daily company budget, so ten large runs cannot exceed the free AI quota. */
+export async function allowCompaniesToday(store: Store, n: number, now = new Date()): Promise<Gate> {
+  const total = await store.hit(`companies:d:${dayKey(now)}:all`, n);
+  return total > limits.companiesGlobalPerDay
+    ? { ok: false, retryAfterSec: secondsToNextDay(now), reason: `Daily demo limit reached (${limits.companiesGlobalPerDay} companies per day across all visitors). Please try again tomorrow.` }
+    : { ok: true };
+}
+
+/** The signed-in owner skips the visitor allowance but keeps a ceiling so a bug cannot run away. */
+export async function allowOwnerRun(store: Store, now = new Date()): Promise<Gate> {
+  const n = await store.hit(`runs:owner:d:${dayKey(now)}`, 1);
+  return n > 30 ? { ok: false, retryAfterSec: secondsToNextDay(now), reason: "Owner daily ceiling (30 runs) reached." } : { ok: true };
 }

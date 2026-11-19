@@ -19,6 +19,8 @@ export interface QualifyCtx {
   fetchedKinds: string[];
   /** True once the research loop has used its whole budget. */
   exhausted: boolean;
+  /** True when every conventional security/trust URL was probed and none exists. */
+  securityExhausted?: boolean;
 }
 
 export function stageProxies(f: CompanyFacts): string[] {
@@ -73,7 +75,8 @@ export function qualify(f: CompanyFacts, ctx: QualifyCtx): Qualification {
   // Required fields for a confident "fit".
   // Order = research priority: SaaS and certification checks can end the search outright, stage rarely can.
   if (f.is_b2b_saas.value === null) missing.push("saas");
-  const securityChecked = ctx.fetchedKinds.includes("security");
+  const securityPageFetched = ctx.fetchedKinds.includes("security");
+  const securityChecked = securityPageFetched || !!ctx.securityExhausted;
   if (!securityChecked && f.certifications.length === 0) missing.push("certs");
   const hasStageEvidence = !!stage || proxies.filter((p) => !p.startsWith("named")).length >= 2;
   if (!hasStageEvidence) missing.push("stage");
@@ -98,7 +101,11 @@ export function qualify(f: CompanyFacts, ctx: QualifyCtx): Qualification {
   }
   const inProgress = f.certifications.filter((c) => c.status === "in_progress");
   if (inProgress.length) reasons.push(`Certification in progress (${inProgress.map((c) => c.name).join(", ")}): a warm buying signal, not a disqualifier.`);
-  else reasons.push("No evidence of SOC 2 / ISO 27001 / GDPR already held on the pages checked.");
+  else if (securityPageFetched) reasons.push("No evidence of SOC 2 / ISO 27001 / GDPR already held on the security/trust page and other pages checked.");
+  else {
+    reasons.push("No public security/trust page exists at the standard paths we probed, and no certification claim appears on the pages checked. That is absence of evidence, not proof the company is uncertified.");
+    flags.push("certs_unverified_no_security_page");
+  }
   const emp = f.employee_count.value;
   if (emp === null) flags.push("headcount_unknown");
   else if (emp < 50 || emp > 200) flags.push(`headcount_outside_50_200 (${emp})`);
@@ -107,9 +114,9 @@ export function qualify(f: CompanyFacts, ctx: QualifyCtx): Qualification {
 }
 
 /** Which page kind to fetch next for a missing field, in order of usefulness. */
-export function pageKindsFor(field: string): ("about" | "product" | "pricing" | "careers" | "security" | "customers")[] {
-  if (field === "certs") return ["security"];
-  if (field === "stage") return ["careers", "about", "pricing", "customers"];
+export function pageKindsFor(field: string): ("about" | "product" | "pricing" | "careers" | "security" | "customers" | "legal" | "press")[] {
+  if (field === "certs") return ["security", "legal"];
+  if (field === "stage") return ["careers", "about", "press", "customers", "pricing"];
   if (field === "saas") return ["product", "pricing", "about"];
   return ["about"];
 }

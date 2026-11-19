@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { discoverDomains, ICP_TEXT } from "@/lib/discover";
-import { ownerOnly } from "@/lib/access";
+import { isOwner } from "@/lib/access";
 import { allowDiscover, clientIp } from "@/lib/limits";
 import { liveDeps } from "@/lib/pipeline";
 
@@ -8,10 +8,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  const denied = ownerOnly(req);
-  if (denied) return denied;
   const deps = liveDeps();
-  const gate = await allowDiscover(deps.store, clientIp(req));
+  const gate = isOwner(req) ? { ok: true as const } : await allowDiscover(deps.store, clientIp(req));
   if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 429, headers: { "retry-after": String(gate.retryAfterSec ?? 3600) } });
   let extra: string | undefined;
   try {

@@ -178,7 +178,7 @@ export function cleanHtml(html: string, baseUrl: string): CleanPage {
   return { title, description, siteName, text, links: uniq };
 }
 
-export type PageKind = "about" | "product" | "pricing" | "careers" | "security" | "customers";
+export type PageKind = "about" | "product" | "pricing" | "careers" | "security" | "customers" | "legal" | "press";
 
 const KIND_PATTERNS: Record<PageKind, RegExp> = {
   about: /\/(about|about-us|company|who-we-are|our-story|team)(\/|$|\?)/i,
@@ -187,14 +187,19 @@ const KIND_PATTERNS: Record<PageKind, RegExp> = {
   careers: /\/(careers?|jobs?|join-us|join|work-with-us|hiring)(\/|$|\?)/i,
   security: /\/(security|trust|trust-center|compliance|security-and-compliance)(\/|$|\?)|^https?:\/\/(trust|security)\./i,
   customers: /\/(customers?|case-stud(y|ies)|success-stories|stories)(\/|$|\?)/i,
+  legal: /\/(legal|privacy|privacy-policy|terms)(\/|$|\?)/i,
+  press: /\/(press|news|newsroom|blog)(\/|$|\?)/i,
 };
-const GUESS_PATH: Record<PageKind, string> = {
-  about: "/about",
-  product: "/product",
-  pricing: "/pricing",
-  careers: "/careers",
-  security: "/security",
-  customers: "/customers",
+/** Conventional paths probed when the homepage does not link a page of this kind. */
+export const PROBES: Record<PageKind, string[]> = {
+  security: ["/security", "/trust", "/trust-center", "/compliance", "/security-and-compliance", "/legal/security"],
+  legal: ["/legal", "/privacy", "/privacy-policy", "/terms", "/legal/privacy"],
+  about: ["/about", "/about-us", "/company", "/team"],
+  careers: ["/careers", "/jobs", "/careers/jobs", "/join-us", "/company/careers"],
+  pricing: ["/pricing", "/plans"],
+  customers: ["/customers", "/case-studies", "/stories"],
+  product: ["/product", "/platform", "/features", "/solutions"],
+  press: ["/press", "/news", "/blog", "/newsroom"],
 };
 const ATS_HOSTS = /(^|\.)(greenhouse\.io|lever\.co|ashbyhq\.com|workable\.com|bamboohr\.com|workdayjobs\.com|smartrecruiters\.com)$/i;
 
@@ -227,8 +232,22 @@ export function pickPage(
   candidates.sort((a, b) => a.href.length - b.href.length);
   if (candidates[0]) return candidates[0].href;
   if (!allowGuess) return null;
-  const guess = new URL(GUESS_PATH[kind], baseUrl).toString();
-  return fetched.has(stripSlash(guess)) ? null : guess;
+  return candidateUrls(kind, links, baseUrl, fetched)[0] ?? null;
+}
+
+/** Linked pages of this kind first (shortest URL first), then the conventional probe paths. Already-fetched URLs are excluded. */
+export function candidateUrls(kind: PageKind, links: { href: string; text: string }[], baseUrl: string, fetched: Set<string>): string[] {
+  const out: string[] = [];
+  const add = (u: string) => {
+    const k = stripSlash(u);
+    if (!fetched.has(k) && !out.some((x) => stripSlash(x) === k)) out.push(u);
+  };
+  const first = pickPage(kind, links, baseUrl, fetched, false);
+  if (first) add(first);
+  const u = new URL(baseUrl);
+  for (const path of PROBES[kind]) add(new URL(path, baseUrl).toString());
+  if (kind === "security") add(`${u.protocol}//trust.${registrable(u.hostname)}/`);
+  return out;
 }
 
 export function stripSlash(u: string) {

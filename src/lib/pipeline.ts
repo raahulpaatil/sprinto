@@ -2,17 +2,19 @@
 
 import { composeEmailText, writeDraft } from "./draft";
 import { emptyFacts, extractFacts, norm, type PageInput } from "./extract";
-import { cleanHtml, fetchHomepage, kindOfUrl, pickPage, realFetch, registrable, stripSlash, type Fetcher, type FetchResult, type PageKind } from "./fetcher";
-import { geminiLLM, type LLM } from "./gemini";
+import { candidateUrls, cleanHtml, fetchHomepage, kindOfUrl, pickPage, realFetch, registrable, stripSlash, type Fetcher, type FetchResult, type PageKind } from "./fetcher";
+import { budgetedLLM, DemoLimitError, geminiLLM, type LLM } from "./gemini";
 import { makeGmailMailer, OWNER_EMAIL, SafetyError, sendPreview, type Mailer } from "./gmail";
-import { hunterContacts, type ContactFinder } from "./hunter";
+import { hunterContacts, hunterRemaining, type ContactFinder } from "./hunter";
 import { pageKindsFor, qualify, THIN_TEXT_CHARS } from "./qualify";
 import { getStore, type Store } from "./store";
 import type { CompanyFacts, CompanyRecord, Contact, SendResult } from "./types";
 
-export const EXTRA_PAGE_CAP = 4; // max extra pages fetched per company (initial scrape + research loop together)
+export const EXTRA_PAGE_CAP = 6; // max extra pages successfully fetched per company (initial scrape + research loop together)
+export const EXTRA_ATTEMPT_CAP = 12; // max extra fetch attempts (probes that 404 count here, not against the page cap)
 export const INITIAL_EXTRA = 2; // extra pages fetched up front
-export const RESEARCH_LOOP_CAP = 2; // max research-loop iterations
+export const RESEARCH_LOOP_CAP = 3; // max research-loop iterations
+export const PROBES_PER_LOOP = 4; // max URLs probed within one loop iteration
 
 export interface Deps {
   fetcher: Fetcher;
@@ -25,7 +27,7 @@ export interface Deps {
 
 export function liveDeps(): Deps {
   const store = getStore();
-  return { fetcher: realFetch, llm: geminiLLM, contacts: hunterContacts, mailer: makeGmailMailer(store), store, now: () => new Date() };
+  return { fetcher: realFetch, llm: budgetedLLM(geminiLLM, store), contacts: cappedContacts(hunterContacts, store), mailer: makeGmailMailer(store), store, now: () => new Date() };
 }
 
 export function newCompany(runId: string, id: string, domain: string, sendEnabled: boolean, now: Date, expectedName?: string, hintContact?: { name: string; role: string }): CompanyRecord {
@@ -135,11 +137,14 @@ async function runCore(c: CompanyRecord, deps: Deps) {
     redirectIssue = `${c.domain} redirects to ${new URL(baseUrl).hostname}, a different domain`;
   }
 
+  let attempts = 0;
+  const exhaustedKinds = new Set<string>(); // kinds where every candidate URL was tried and none worked
   const fetchExtra = async (kind: PageKind, url: string) => {
     fetched.add(stripSlash(url));
-    extra++;
+    attempts++;
     const r = await deps.fetcher(url);
     fetched.add(stripSlash(r.finalUrl));
+    if (r.ok) extra++;
     addPage(c, r, kind, deps);
     return r;
   };
@@ -180,41 +185,61 @@ async function runCore(c: CompanyRecord, deps: Deps) {
       totalChars: totalChars(),
       fetchedKinds: c.pages.filter((p) => p.ok).map((p) => p.kind === "other" ? kindOfUrl(p.url) : p.kind),
       exhausted,
+      securityExhausted: exhaustedKinds.has("security"),
     };
   };
 
   c.stage = "qualify";
   let q = qualify(c.facts as CompanyFacts, ctx(false));
   while (q.result === "needs_research") {
-    if (c.research.loops >= RESEARCH_LOOP_CAP || extra >= EXTRA_PAGE_CAP) {
+    if (c.research.loops >= RESEARCH_LOOP_CAP || extra >= EXTRA_PAGE_CAP || attempts >= EXTRA_ATTEMPT_CAP) {
       c.research.exhausted = true;
-      note(c, deps, "qualify", `Research budget exhausted (${c.research.loops}/${RESEARCH_LOOP_CAP} loops). Stopping.`);
+      note(c, deps, "qualify", `Research budget exhausted (${c.research.loops}/${RESEARCH_LOOP_CAP} loops, ${attempts} fetch attempts). Stopping.`);
       q = qualify(c.facts as CompanyFacts, ctx(true));
       break;
     }
     // Round-robin across missing fields so one stubborn field cannot eat the whole budget.
     const tried = (f: string) => c.research.steps.filter((s) => s.field === f).length;
     const field = [...q.missing].sort((a, b) => tried(a) - tried(b))[0];
-    let url: string | null = null;
-    let kind: PageKind | null = null;
-    for (const k of pageKindsFor(field)) {
-      url = pickPage(k, links, baseUrl, fetched, true);
-      if (url) {
-        kind = k;
-        break;
-      }
-    }
     c.research.loops++;
-    if (!url || !kind) {
+    // Pick the first page kind for this field that still has untried candidate URLs, then probe up to PROBES_PER_LOOP of them.
+    let kind: PageKind | null = null;
+    let cands: string[] = [];
+    for (const k of pageKindsFor(field)) {
+      if (exhaustedKinds.has(k)) continue;
+      const list = candidateUrls(k, links, baseUrl, fetched);
+      if (list.length === 0) {
+        exhaustedKinds.add(k);
+        continue;
+      }
+      kind = k;
+      cands = list;
+      break;
+    }
+    if (!kind) {
       c.research.steps.push({ field, url: null, ok: false, note: "no candidate page left" });
       note(c, deps, "research", `Loop ${c.research.loops}: missing ${field}, no page left to try.`);
       q = qualify(c.facts as CompanyFacts, ctx(false));
       continue;
     }
-    note(c, deps, "research", `Loop ${c.research.loops}: missing ${field}; fetching ${url}`);
-    const r = await fetchExtra(kind, url);
-    c.research.steps.push({ field, url, ok: r.ok, note: r.ok ? undefined : r.error });
-    if (r.ok) await doExtract();
+    let got: FetchResult | null = null;
+    const probed: string[] = [];
+    for (const url of cands.slice(0, PROBES_PER_LOOP)) {
+      if (attempts >= EXTRA_ATTEMPT_CAP) break;
+      probed.push(url);
+      note(c, deps, "research", `Loop ${c.research.loops}: missing ${field}; trying ${kind} page ${url}`);
+      const r = await fetchExtra(kind, url);
+      if (r.ok) {
+        got = r;
+        break;
+      }
+    }
+    if (!got && cands.length <= PROBES_PER_LOOP) exhaustedKinds.add(kind); // every candidate for this kind has now been tried
+    c.research.steps.push({ field, url: got?.finalUrl ?? probed[probed.length - 1] ?? null, ok: !!got, note: got ? undefined : `probed ${probed.length} URL(s), none found` });
+    if (got) {
+      exhaustedKinds.delete(kind);
+      await doExtract();
+    }
     q = qualify(c.facts as CompanyFacts, ctx(false));
   }
   c.decision = {
@@ -230,7 +255,7 @@ async function runCore(c: CompanyRecord, deps: Deps) {
 
   // 4. Contact (only after qualifying)
   c.stage = "contact";
-  const found = await deps.contacts(c.domain);
+  const found = await deps.contacts(c.domain, { runId: c.runId, companyId: c.id });
   if (found.contact) {
     c.contact = found.contact;
     note(c, deps, "contact", `Selected ${found.contact.name}, ${found.contact.role} (${found.contact.why}).`);
@@ -252,6 +277,7 @@ export async function draftAndSend(c: CompanyRecord, deps: Deps) {
   c.stage = "draft";
   const pages = pageInputs(c);
   const { pains, draft } = await writeDraft(c.contact, c.facts, c.domain, pages, deps.llm);
+  if (c.decision.result === "manual_review") draft.label = "manual_review";
   c.pains = pains;
   c.draft = draft;
   note(c, deps, "draft", `Draft ${draft.status}${draft.problems.length ? `: ${draft.problems[0]}` : ""}`);
@@ -262,11 +288,14 @@ export async function draftAndSend(c: CompanyRecord, deps: Deps) {
 
 export async function trySend(c: CompanyRecord, deps: Deps, to: string = OWNER_EMAIL): Promise<SendResult> {
   const at = deps.now().toISOString();
-  if (!c.owner) return { status: "not_attempted", note: "Sending is owner-only; nothing was emailed.", at };
   if (!c.sendEnabled) return { status: "not_attempted", note: "Sending to your inbox was turned off for this run.", at };
   if (!c.draft || !c.contact) return { status: "not_attempted", note: "No draft yet.", at };
   if (c.draft.status !== "ready") {
     return { status: "not_attempted", note: `Not sent: the draft is "${c.draft.status}". ${c.draft.problems.join(" ")}`.trim(), at };
+  }
+  const sendsToday = await deps.store.hit(`sends:d:${at.slice(0, 10)}`, 1);
+  if (sendsToday > Number(process.env.SENDS_GLOBAL_PER_DAY || 25)) {
+    return { status: "not_attempted", note: "Daily demo limit reached for preview emails. Try again tomorrow. The draft above is still yours to read.", at };
   }
   try {
     return await sendPreview({
@@ -284,6 +313,7 @@ export async function trySend(c: CompanyRecord, deps: Deps, to: string = OWNER_E
         hookUrl: c.draft.hookEvidence.url,
         pains: c.pains ?? [],
         uncertain: c.draft.uncertainFields,
+        banner: c.draft.label === "manual_review" ? `MANUAL-REVIEW DRAFT: this company is NOT qualified as a fit. Unresolved: ${c.decision.missing.join(", ") || "see reasons"}. ${c.decision.reasons.join(" ")}` : undefined,
       }),
       store: deps.store,
       mailer: deps.mailer,
@@ -297,7 +327,12 @@ export async function trySend(c: CompanyRecord, deps: Deps, to: string = OWNER_E
 
 export async function continueWithContact(c: CompanyRecord, contact: Omit<Contact, "source" | "why">, deps: Deps): Promise<CompanyRecord> {
   try {
-    if (c.decision.result !== "fit") throw new Error("Only companies that qualified as a fit can continue.");
+    if (c.decision.result === "skip") throw new Error("This company was skipped (it fails a hard ICP rule), so no draft can be made for it.");
+    if (c.decision.result !== "fit" && c.decision.result !== "manual_review") throw new Error("This company has no decision yet.");
+    if (c.decision.result === "manual_review" && !c.decision.flags.includes("manual_override")) {
+      c.decision.flags.push("manual_override");
+      note(c, deps, "qualify", "Manual-review override: continuing to a draft on your instruction. Unverified fields stay marked uncertain.");
+    }
     if (!contact.name.trim() || !contact.role.trim()) throw new Error("Contact needs a name and a role.");
     c.contact = { name: contact.name.trim().slice(0, 80), role: contact.role.trim().slice(0, 100), email: contact.email?.trim() || undefined, source: "manual", why: "Supplied by you (not looked up)" };
     c.contactSkip = undefined;
@@ -319,4 +354,39 @@ export async function resend(c: CompanyRecord, deps: Deps): Promise<CompanyRecor
   note(c, deps, "send", `Send ${c.send.status}: ${c.send.note}`);
   await persist(c, deps);
   return c;
+}
+
+export const HUNTER_PER_RUN_CAP = 5; // lookups per run, whatever the number of domains
+export const HUNTER_RESERVE = 10; // credits never spent: a lookup is refused if it would leave fewer than this
+export const HUNTER_MONTHLY_CAP = 40; // persistent backstop in Postgres (50 free credits minus the reserve)
+
+/**
+ * Every Hunter lookup passes these gates, in order, and each failure is a graceful skip with a visible note:
+ *  1. at most one lookup per company record (re-processing cannot retry it)
+ *  2. at most HUNTER_PER_RUN_CAP lookups per run
+ *  3. Hunter's own account endpoint (fresh, free) must report enough credits to stay at or above the reserve after this lookup;
+ *     if it cannot be read, the lookup is refused (fail closed)
+ *  4. a persistent per-month counter in the database (survives restarts and redeploys) must be under the monthly cap
+ * A lookup is one Domain Search with limit=10 (Hunter bills 1 credit per 10 emails returned) and at most one retry, and only after a failed call.
+ */
+export function cappedContacts(
+  base: ContactFinder,
+  store: Store,
+  opts: { remaining?: () => Promise<number | null>; now?: () => Date } = {},
+): ContactFinder {
+  const remaining = opts.remaining ?? hunterRemaining;
+  return async (domain, ctx) => {
+    const num = (v: string | undefined, d: number) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.floor(Number(v)) : d);
+    if (ctx) {
+      if ((await store.hit(`hunter:co:${ctx.companyId}`, 1)) > 1) return { skip: "A contact lookup was already made for this company. It is not repeated, to protect the Hunter credits. You can add a contact yourself and continue." };
+      if ((await store.hit(`hunter:run:${ctx.runId}`, 1)) > num(process.env.HUNTER_PER_RUN_CAP, HUNTER_PER_RUN_CAP)) return { skip: `This run already used its ${HUNTER_PER_RUN_CAP} contact lookups, so none was made for this company. You can add a contact yourself and continue.` };
+    }
+    const reserve = num(process.env.HUNTER_RESERVE, HUNTER_RESERVE);
+    const left = await remaining();
+    if (left === null) return { skip: "Hunter's remaining credits could not be verified, so no lookup was made (credits are protected). You can add a contact yourself and continue." };
+    if (left - 1 < reserve) return { skip: `Hunter reports ${Math.max(0, left)} credits left; a lookup would drop it below the ${reserve}-credit reserve, so none was made. You can add a contact yourself and continue.` };
+    const month = (opts.now ? opts.now() : new Date()).toISOString().slice(0, 7);
+    if ((await store.hit(`hunter:m:${month}`, 1)) > num(process.env.HUNTER_MONTHLY_CAP, HUNTER_MONTHLY_CAP)) return { skip: "This month's contact-lookup budget for the demo is used up, so no lookup was made. You can add a contact yourself and continue." };
+    return base(domain, ctx);
+  };
 }

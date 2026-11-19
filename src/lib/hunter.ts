@@ -3,7 +3,11 @@
 
 import type { Contact } from "./types";
 
-export type ContactFinder = (domain: string) => Promise<{ contact?: Contact; skip?: string }>;
+export interface LookupCtx {
+  runId: string;
+  companyId: string;
+}
+export type ContactFinder = (domain: string, ctx?: LookupCtx) => Promise<{ contact?: Contact; skip?: string }>;
 
 export function hunterConfigured() {
   return !!process.env.HUNTER_API_KEY?.trim();
@@ -64,8 +68,8 @@ export const hunterContacts: ContactFinder = async (domain) => {
   if (!key) return { skip: "No HUNTER_API_KEY is configured, so no contact was looked up. No contact was invented." };
   const base = "https://api.hunter.io/v2/domain-search";
   const attempts = [
-    `${base}?domain=${encodeURIComponent(domain)}&limit=20&seniority=senior,executive`,
-    `${base}?domain=${encodeURIComponent(domain)}&limit=20`,
+    `${base}?domain=${encodeURIComponent(domain)}&limit=10&seniority=senior,executive`,
+    `${base}?domain=${encodeURIComponent(domain)}&limit=10`,
   ];
   let lastErr = "";
   for (const url of attempts) {
@@ -89,3 +93,31 @@ export const hunterContacts: ContactFinder = async (domain) => {
   }
   return { skip: `Hunter lookup failed (${lastErr || "unknown error"}). No contact was invented.` };
 };
+
+export interface HunterAccount {
+  plan: string | null;
+  used: number | null;
+  available: number | null;
+  resetDate: string | null;
+}
+
+/** Free call (does not use credits). Returns numbers only; the key is never exposed. */
+export async function hunterAccount(): Promise<HunterAccount | null> {
+  const key = process.env.HUNTER_API_KEY?.trim();
+  if (!key) return null;
+  try {
+    const res = await fetch("https://api.hunter.io/v2/account", { headers: { "X-API-KEY": key }, signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { data?: { plan_name?: string; reset_date?: string; requests?: { searches?: { used?: number; available?: number }; credits?: { used?: number; available?: number } } } };
+    const r = j.data?.requests?.credits ?? j.data?.requests?.searches; // credits is the current free-plan counter (50/month)
+    return { plan: j.data?.plan_name ?? null, used: r?.used ?? null, available: r?.available ?? null, resetDate: j.data?.reset_date ?? null };
+  } catch {
+    return null;
+  }
+}
+
+/** Credits left according to Hunter itself, read fresh before every lookup (the account call is free). null = could not be verified. */
+export async function hunterRemaining(): Promise<number | null> {
+  const a = await hunterAccount();
+  return a && a.available !== null && a.used !== null ? a.available - a.used : null;
+}

@@ -1,22 +1,31 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { SAMPLE } from "@/lib/sample";
 import type { CompanyRecord, Fact } from "@/lib/types";
 
 type Health = {
   owner: boolean;
-  ownerConfigured?: boolean;
-  gemini: boolean;
-  hunter: boolean;
-  gmail: boolean;
+  sendReady?: boolean;
+  contactLookup?: boolean;
+  // owner-only detail
+  gemini?: boolean;
+  hunter?: boolean;
+  hunterAccount?: { plan: string | null; used: number | null; available: number | null; resetDate: string | null } | null;
+  gmail?: boolean;
   gmailCanConnect?: boolean;
-  store: { kind: string; durable: boolean; ok: boolean };
-  sendsOnlyTo: string;
+  store?: { kind: string; durable: boolean; ok: boolean };
+  usageToday?: { runs: number; companies: number; geminiCalls: number; sends: number; hunterThisMonth: number };
+  caps?: { runsGlobalPerDay: number; companiesGlobalPerDay: number; geminiDailyCallCap: number; hunterMonthlyCap: number; sendsGlobalPerDay: number };
+  sendsOnlyTo?: string;
 };
 type Candidate = { domain: string; name: string; why: string };
 
 const LS_RUN = "sprinto:lastRun";
+const MISSING_TEXT: Record<string, string> = {
+  saas: "B2B SaaS status: the pages checked do not clearly say what the company sells or to whom.",
+  stage: "Funding stage: no named stage (Series A-C) on the site and fewer than two stage proxies (5+ open roles, enterprise pricing tier).",
+  certs: "Certification status: no security or trust page was found at the standard paths, so SOC 2 / ISO 27001 / GDPR could not be checked.",
+};
 
 async function api<T>(url: string, body?: unknown, method = body === undefined ? "GET" : "POST"): Promise<T> {
   const res = await fetch(url, {
@@ -169,7 +178,28 @@ function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact
         </details>
       )}
 
-      {finished && c.decision.result === "fit" && (
+      {finished && c.decision.result === "skip" && (
+        <p className="hint">Terminal: this company fails a hard ICP rule, so no contact lookup and no draft are made for it. Remove it from the list.</p>
+      )}
+      {finished && c.decision.result === "manual_review" && (
+        <details open>
+          <summary>What is missing, and what you can do</summary>
+          {c.decision.missing.length > 0 ? (
+            <ul className="ul">
+              {c.decision.missing.map((m) => (
+                <li key={m}>{MISSING_TEXT[m] ?? m}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="hint">The reasons above explain why this needs a human look.</p>
+          )}
+          <p className="hint">
+            This stays a manual-review case. To resolve it, check the missing item yourself (for example funding on the company’s own announcements, or its trust page) and re-run the exact domain.
+            You can also add a contact below to get a clearly labelled <b>manual-review draft</b>. That does not change the decision, and previews still go only to the owner’s inbox.
+          </p>
+        </details>
+      )}
+      {finished && (c.decision.result === "fit" || c.decision.result === "manual_review") && (
         <details open>
           <summary>Point of contact</summary>
           {c.contact ? (
@@ -186,7 +216,7 @@ function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact
               </div>
               <div className="sendrow">
                 <button className="secondary" disabled={busy || cName.trim().length < 3 || cRole.trim().length < 2} onClick={() => onContact(c.id, cName, cRole)}>
-                  {busy ? "Working…" : "Continue with this contact"}
+                  {busy ? "Working…" : c.decision.result === "manual_review" ? "Draft anyway (labelled manual-review)" : "Continue with this contact"}
                 </button>
               </div>
             </>
@@ -211,7 +241,8 @@ function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact
 
       {c.draft && (
         <details open>
-          <summary>Draft email ({c.draft.status.replace("_", " ")})</summary>
+          <summary>Draft email ({c.draft.status.replace("_", " ")}){c.draft.label === "manual_review" ? " · MANUAL-REVIEW DRAFT" : ""}</summary>
+          {c.draft.label === "manual_review" && <div className="err">Manual-review draft: this company is not qualified as a fit. The decision above is unchanged and unresolved items stay marked uncertain.</div>}
           <div className="hint">Subject</div>
           <div><b>{c.draft.subject}</b></div>
           <pre className="mail">{c.draft.body}</pre>
@@ -232,7 +263,7 @@ function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact
             <span>{c.send.note}</span>
           </div>
           <div className="hint">{c.send.to ? `To: ${c.send.to} · ` : ""}{c.send.messageId ? `Gmail id ${c.send.messageId} · ` : ""}{new Date(c.send.at).toLocaleString()}</div>
-          {c.draft?.status === "ready" && c.owner && (
+          {c.draft?.status === "ready" && (
             <div className="sendrow">
               <button className="secondary" disabled={busy} onClick={() => onResend(c.id)}>
                 {c.send.status === "sent" || c.send.status === "duplicate_prevented" ? "Try sending again (the lock should refuse)" : `Send preview to my inbox${c.send.status === "unknown" ? " (checks Gmail first)" : ""}`}
@@ -275,7 +306,6 @@ export default function Home() {
     api<Health>("/api/health")
       .then((h) => {
         setHealth(h);
-        if (!h.owner) return;
         try {
           const last = new URLSearchParams(window.location.search).get("run") ?? localStorage.getItem(LS_RUN);
           if (last && /^[0-9a-f-]{36}$/.test(last)) api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`).then((r) => setCompanies(r.companies)).catch(() => undefined);
@@ -369,62 +399,38 @@ export default function Home() {
     return m;
   }, {});
 
-  if (health && !health.owner) {
-    return (
-      <main className="wrap">
-        <h1>Sprinto</h1>
-        <p className="sub">
-          Cold-outreach research assistant for Sprinto’s Growth Lead. For each company domain it scrapes the site, extracts facts with cited evidence, qualifies the
-          company against the ICP, finds a contact, drafts a grounded first email and sends a preview only to the owner’s own inbox. Nothing is ever sent to a prospect.
-        </p>
-        <div className="card">
-          <h2>Live runs are owner-only</h2>
-          <p className="hint" style={{ margin: 0 }}>
-            Research, discovery, contact lookup, drafting, sending and stored results use paid and private services, so they require the owner’s sign-in. This public page shows
-            static sample output only and makes no live calls. <a href="/owner">Owner sign-in</a>
-          </p>
-        </div>
-        <h2>How a company is decided</h2>
-        <ul className="ul">
-          <li>B2B SaaS is required. Series A-C is a hard filter, named on the site and always labelled a proxy, not proof. 50-200 employees is a soft band that is flagged but never disqualifies.</li>
-          <li>Already holding SOC 2, ISO 27001 or GDPR disqualifies, shown with the exact quote. Thin or conflicting evidence goes to manual review with the reason.</li>
-          <li>Every fact needs a verbatim quote from a fetched page. Unverifiable claims are dropped, and anything uncertain is shown as uncertain.</li>
-          <li>A first email needs a hook tied to a quote that is verified on a fetched page, and it can only ever be previewed to the owner’s own inbox.</li>
-        </ul>
-        <h2>Sample output <span className="conf proxy">static example, not live data</span></h2>
-        <Company c={SAMPLE} onContact={() => undefined} onResend={() => undefined} busy={false} />
-        <p className="foot">Built for Mesa Term 2 AI Case 2. The sample above is a frozen example from public website text.</p>
-      </main>
-    );
-  }
-  if (!health) {
-    return (
-      <main className="wrap">
-        <h1>Sprinto</h1>
-        <p className="sub">Loading…</p>
-      </main>
-    );
-  }
-
   return (
     <main className="wrap">
       <div className="co-head">
         <h1>Sprinto</h1>
-        <span className="hint">Owner mode · <button className="secondary" onClick={async () => { await fetch("/api/owner/logout", { method: "POST" }); window.location.reload(); }}>Sign out</button></span>
+        {health?.owner ? (
+          <span className="hint">Owner mode · <button className="secondary" onClick={async () => { await fetch("/api/owner/logout", { method: "POST" }); window.location.reload(); }}>Sign out</button></span>
+        ) : null}
       </div>
       <p className="sub">
         Cold-outreach research assistant for Sprinto’s Growth Lead. Paste company domains (or discover them from the ICP). For each one it scrapes the site,
         extracts facts with cited evidence, qualifies against the ICP, finds a contact, drafts a grounded first email and sends a preview <b>only to the owner’s own inbox</b>.
-        Nothing is ever sent to a prospect.
+        Nothing is ever sent to a prospect. This is a free-tier demo with small daily limits; your results are visible only through your own run link.
       </p>
 
       <div className="chips" aria-label="System status">
         {health ? (
           <>
-            <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
-            <span className={`chip ${health.hunter ? "ok" : "warn"}`}>Hunter {health.hunter ? "ready" : "no key: contacts can be added manually"}</span>
-            <span className={`chip ${health.gmail ? "ok" : "warn"}`}>Gmail {health.gmail ? `ready, sends only to ${health.sendsOnlyTo}` : "not connected: drafts shown, nothing sent"}{health.gmailCanConnect ? <> · <a href="/api/gmail/start">Connect Gmail</a></> : null}</span>
-            <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>
+            <span className={`chip ${health.contactLookup ? "ok" : "warn"}`}>Contact lookup {health.contactLookup ? "on" : "off: add contacts by hand"}</span>
+            <span className={`chip ${health.sendReady ? "ok" : "warn"}`}>Preview email {health.sendReady ? "on: goes only to the owner’s inbox" : "not connected yet: drafts are shown, nothing is sent"}</span>
+            {health.owner && (
+              <>
+                <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
+                {health.hunterAccount && (
+                  <span className="chip">Hunter {health.hunterAccount.plan ?? "plan ?"}: {health.hunterAccount.available !== null && health.hunterAccount.used !== null ? `${health.hunterAccount.available - health.hunterAccount.used} of ${health.hunterAccount.available} left` : "usage unknown"}</span>
+                )}
+                {health.store && <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>}
+                {health.usageToday && health.caps && (
+                  <span className="chip">Today: {health.usageToday.runs}/{health.caps.runsGlobalPerDay} runs · {health.usageToday.geminiCalls}/{health.caps.geminiDailyCallCap} AI calls · {health.usageToday.sends}/{health.caps.sendsGlobalPerDay} sends · Hunter {health.usageToday.hunterThisMonth}/{health.caps.hunterMonthlyCap} this month</span>
+                )}
+                {health.gmailCanConnect && <span className="chip warn"><a href="/api/gmail/start">Connect Gmail</a></span>}
+              </>
+            )}
           </>
         ) : (
           <span className="chip">Checking status…</span>
@@ -496,7 +502,7 @@ export default function Home() {
       ))}
 
       <p className="foot">
-        Sprinto never invents company facts or contacts: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
+        {health && !health.owner && <><a href="/owner">Owner sign-in</a> · </>}Sprinto never invents company facts or contacts: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
         Qualification rules are deterministic code; the model only extracts and drafts. Built for Mesa Term 2 AI Case 2.
       </p>
     </main>

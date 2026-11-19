@@ -1,6 +1,14 @@
 // Gemini access over plain REST. The key is read from GEMINI_API_KEY (server-side only) and sent in a header.
 
 export type LlmKind = "extract" | "draft" | "discover";
+
+/** Thrown when the free-tier budget is spent. The UI shows it as a clean "demo limit reached" state, never a crash. */
+export class DemoLimitError extends Error {
+  constructor(msg = "Daily demo limit reached, try again tomorrow.") {
+    super(msg);
+    this.name = "DemoLimitError";
+  }
+}
 export interface LlmRequest {
   kind: LlmKind;
   system: string;
@@ -35,7 +43,11 @@ export const geminiLLM: LLM = async ({ system, prompt, temperature = 0.2 }) => {
           generationConfig: { responseMimeType: "application/json", temperature },
         }),
       });
-      if (res.status === 429 || res.status >= 500) {
+      if (res.status === 429) {
+        lastErr = "Gemini HTTP 429";
+        break; // quota exhausted: do not hammer the API
+      }
+      if (res.status >= 500) {
         lastErr = `Gemini HTTP ${res.status}`;
         await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
         continue;
@@ -64,5 +76,17 @@ export const geminiLLM: LLM = async ({ system, prompt, temperature = 0.2 }) => {
       lastErr = msg;
     }
   }
+  if (/429/.test(lastErr)) throw new DemoLimitError("Daily demo limit reached (the free AI quota is used up), try again tomorrow.");
   throw new Error(`Gemini failed: ${lastErr}`);
 };
+
+/** Hard stop before any billable usage: every model call is counted per UTC day and refused past the cap. */
+export function budgetedLLM(base: LLM, store: { hit(key: string, by: number): Promise<number> }): LLM {
+  return async (req) => {
+    const cap = Number(process.env.GEMINI_DAILY_CALL_CAP || 150);
+    const day = new Date().toISOString().slice(0, 10);
+    const used = await store.hit(`gemini:d:${day}`, 1);
+    if (used > cap) throw new DemoLimitError("Daily demo limit reached (the AI call budget for today is used up), try again tomorrow.");
+    return base(req);
+  };
+}

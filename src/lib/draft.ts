@@ -149,9 +149,11 @@ export function composeEmailText(opts: {
   hookUrl: string;
   pains: Pain[];
   uncertain: string[];
+  banner?: string;
 }): string {
   const lines = [
     "SPRINTO PREVIEW - sent to you only. The prospect was NOT emailed.",
+    ...(opts.banner ? [opts.banner] : []),
     `Would be addressed to: ${opts.contact.name}, ${opts.contact.role} at ${opts.company} (${opts.domain})`,
     "------------------------------------------------------------",
     `Subject: ${opts.subject}`,

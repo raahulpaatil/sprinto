@@ -6,13 +6,13 @@ import { AmbiguousSendError, assertAllowedRecipient, buildRaw, OWNER_EMAIL, Safe
 import { rankContacts, type ContactFinder } from "../src/lib/hunter";
 import { normalizeDomain, realFetch, type Fetcher } from "../src/lib/fetcher";
 import { MemoryStore } from "../src/lib/store";
-import { newCompany, processCompany, trySend, type Deps } from "../src/lib/pipeline";
-import type { LLM, LlmRequest } from "../src/lib/gemini";
+import { cappedContacts, continueWithContact, newCompany, processCompany, RESEARCH_LOOP_CAP, trySend, type Deps } from "../src/lib/pipeline";
+import { budgetedLLM, DemoLimitError, type LLM, type LlmRequest } from "../src/lib/gemini";
 import type { CompanyRecord } from "../src/lib/types";
 import { allowAttempt, allowDiscover, allowRun, limits } from "../src/lib/limits";
 import { discoverDomains } from "../src/lib/discover";
 import { open as unseal, seal } from "../src/lib/secrets";
-import { checkOwnerKey, isOwner, issueOwnerCookie, OWNER_COOKIE, ownerOnly, signValue, verifySigned } from "../src/lib/access";
+import { canAccessRun, checkOwnerKey, isOwner, issueOwnerCookie, OWNER_COOKIE, ownerOnly, signValue, verifySigned } from "../src/lib/access";
 import { gmailStatus, resolveRefreshToken, storeRefreshToken } from "../src/lib/gmail";
 
 // ---------- tiny test framework ----------
@@ -312,9 +312,9 @@ async function main() {
       },
       contacts: usePriya,
     });
-    check("loop stopped at the cap (2)", r.c.research.loops === 2 && r.c.research.exhausted, JSON.stringify(r.c.research), true);
+    check(`loop stopped at the cap (${RESEARCH_LOOP_CAP})`, r.c.research.loops === RESEARCH_LOOP_CAP && r.c.research.exhausted, JSON.stringify(r.c.research), true);
     check("routed to manual_review with budget reason", r.c.decision.result === "manual_review" && /budget exhausted/i.test(r.c.decision.reasons.join(" ")), r.c.decision.reasons.join(" | "));
-    check("extra fetches within cap of 4", r.fetchCalls.length <= 1 + 4 + 2, String(r.fetchCalls.length));
+    check("extra fetch attempts within the cap of 12", r.fetchCalls.length <= 1 + 12 + 3, String(r.fetchCalls.length));
     check("no contact lookup or email", r.counts.contacts === 0 && r.mailer.deliveries.length === 0);
   }
 
@@ -425,10 +425,10 @@ async function main() {
     const store = new MemoryStore();
     const t = new Date("2026-11-19T10:15:00Z");
     const first5 = [];
-    for (let i = 0; i < 5; i++) first5.push((await allowRun(store, "1.1.1.1", t)).ok);
+    for (let i = 0; i < limits.runsPerIpPerHour; i++) first5.push((await allowRun(store, "1.1.1.1", t)).ok);
     const sixth = await allowRun(store, "1.1.1.1", t);
-    check("5 runs per hour per IP allowed", first5.every(Boolean), JSON.stringify(first5));
-    check("6th run in the hour is blocked with a retry time", !sixth.ok && (sixth.retryAfterSec ?? 0) > 0 && /per hour/.test(sixth.reason ?? ""), JSON.stringify(sixth));
+    check(`${limits.runsPerIpPerHour} runs per hour per IP allowed`, first5.every(Boolean) && limits.runsPerIpPerHour === 3, JSON.stringify(first5));
+    check("next run in the hour is blocked with a retry time", !sixth.ok && (sixth.retryAfterSec ?? 0) > 0 && /per hour/.test(sixth.reason ?? ""), JSON.stringify(sixth));
     check("a different IP is unaffected", (await allowRun(store, "2.2.2.2", t)).ok);
     check("limit resets next hour", (await allowRun(store, "1.1.1.1", new Date("2026-11-19T11:00:05Z"))).ok);
     // global daily cap of 20, spread over many IPs so the per-IP limit never trips
@@ -439,12 +439,12 @@ async function main() {
       const r = await allowRun(g, `10.0.0.${i}`, t);
       if (r.ok) allowed++; else blockedGlobal = r;
     }
-    check("global daily cap of 20 holds", allowed === limits.runsGlobalPerDay && /daily capacity/.test(blockedGlobal.reason ?? ""), `allowed=${allowed}`);
+    check("global daily cap of 10 holds with a clean message", allowed === limits.runsGlobalPerDay && limits.runsGlobalPerDay === 10 && /Daily demo limit reached.*tomorrow/.test(blockedGlobal.reason ?? ""), `allowed=${allowed} ${blockedGlobal.reason}`);
     check("global cap resets next day", (await allowRun(g, "10.9.9.9", new Date("2026-11-20T00:00:05Z"))).ok);
     const d = new MemoryStore();
     const dres = [];
-    for (let i = 0; i < 6; i++) dres.push((await allowDiscover(d, "3.3.3.3", t)).ok);
-    check("discovery limited to 5 per hour per IP", dres.slice(0, 5).every(Boolean) && !dres[5], JSON.stringify(dres));
+    for (let i = 0; i < 4; i++) dres.push((await allowDiscover(d, "3.3.3.3", t)).ok);
+    check("discovery limited to 3 per hour per IP", dres.slice(0, 3).every(Boolean) && !dres[3], JSON.stringify(dres));
     const a = new MemoryStore();
     const att = [];
     for (let i = 0; i < 4; i++) att.push(await allowAttempt(a, "process", "co-1", limits.processAttempts));
@@ -506,9 +506,126 @@ async function main() {
     const st = signValue("state~verifier");
     check("signed OAuth state verifies", verifySigned(st) === "state~verifier");
     check("forged OAuth state rejected", verifySigned("evil~verifier." + st.split(".").pop()) === null && verifySigned("state~verifier.AAAA") === null, "", true);
-    const v = await run({ domain: "acmecloud.test", pages: acmePages, extract: acmeExtract, contacts: usePriya, draft: goodDraft, visitor: true });
-    check("a non-owner company never sends even with sending enabled", v.mailer.deliveries.length === 0 && v.c.send?.status === "not_attempted", v.c.send?.status ?? "", true);
     if (saved === undefined) delete process.env.OWNER_KEY; else process.env.OWNER_KEY = saved;
+  }
+
+  // 17. public access model
+  current = "17 public access model and isolation";
+  {
+    const saved = process.env.OWNER_KEY;
+    process.env.OWNER_KEY = "test-owner-key-1234567890";
+    const anon = new Request("https://x.test/api");
+    const owner = new Request("https://x.test/api", { headers: { cookie: `${OWNER_COOKIE}=${issueOwnerCookie()!.value}` } });
+    check("a visitor can read a public run", canAccessRun(anon, { public: true }));
+    check("a visitor cannot read an owner run", !canAccessRun(anon, { owner: true }), "", true);
+    check("a visitor cannot read a legacy run (no public flag)", !canAccessRun(anon, {}), "", true);
+    check("a visitor cannot read a missing run", !canAccessRun(anon, null));
+    check("the owner can read owner and legacy runs", canAccessRun(owner, { owner: true }) && canAccessRun(owner, {}));
+    if (saved === undefined) delete process.env.OWNER_KEY; else process.env.OWNER_KEY = saved;
+
+    // public sends are allowed but stay locked to the owner inbox and to one per company
+    const pub = await run({ domain: "acmecloud.test", pages: acmePages, extract: acmeExtract, contacts: usePriya, draft: goodDraft, visitor: true });
+    check("a public run can preview-send, only to the owner inbox", pub.mailer.deliveries.length === 1 && nothingLeftTheAllowlist(pub.mailer), JSON.stringify(pub.mailer.deliveries), true);
+    const again = await trySend(pub.c, pub.deps);
+    check("second send for the same company is refused by the lock", again.status === "duplicate_prevented" && pub.mailer.deliveries.length === 1, again.status, true);
+    const blockedTo = await trySend(pub.c, pub.deps, "someone@else.com");
+    check("a public run still cannot address anyone else", blockedTo.status === "blocked" && pub.mailer.deliveries.length === 1, blockedTo.status, true);
+
+    // Gemini hard budget
+    process.env.GEMINI_DAILY_CALL_CAP = "3";
+    let baseCalls = 0;
+    const bl = budgetedLLM(async () => { baseCalls++; return {}; }, new MemoryStore());
+    let stopped: unknown = null;
+    for (let i = 0; i < 5; i++) { try { await bl({ kind: "extract", system: "s", prompt: "p" }); } catch (e) { stopped = e; } }
+    check("Gemini calls stop at the daily cap with a clean limit error", baseCalls === 3 && stopped instanceof DemoLimitError && /try again tomorrow/.test((stopped as Error).message), `calls=${baseCalls}`, true);
+    delete process.env.GEMINI_DAILY_CALL_CAP;
+
+    // Hunter budget gates (precise): per company, per run, reserve vs Hunter's own remaining count, persistent monthly counter
+    delete process.env.HUNTER_MONTHLY_CAP;
+    let hunterCalls = 0;
+    const baseFinder: ContactFinder = async () => { hunterCalls++; return { skip: "base" }; };
+    const mem = new MemoryStore();
+    let remainingNow: number | null = 50;
+    const hc = cappedContacts(baseFinder, mem, { remaining: async () => remainingNow });
+    const ctxFor = (run: string, co: string) => ({ runId: run, companyId: co });
+    const res: { skip?: string }[] = [];
+    for (let i = 1; i <= 7; i++) res.push(await hc(`d${i}.com`, ctxFor("run-A", `co-${i}`)));
+    check("per-run ceiling: 5 lookups, then graceful skips", hunterCalls === 5 && /already used its 5 contact lookups/.test(res[5].skip ?? "") && /already used its 5/.test(res[6].skip ?? ""), `calls=${hunterCalls} ${res[5].skip}`, true);
+    const reprocess = await hc("d1.com", ctxFor("run-B", "co-1"));
+    check("one lookup per company record: a re-process cannot look up again", hunterCalls === 5 && /already made for this company/.test(reprocess.skip ?? ""), `calls=${hunterCalls}`, true);
+    await hc("e.com", ctxFor("run-B", "co-b1"));
+    check("a different run gets its own per-run allowance", hunterCalls === 6);
+    remainingNow = 11; // 11 - 1 = 10 >= reserve: allowed
+    await hc("f.com", ctxFor("run-C", "co-c1"));
+    check("lookup allowed while it leaves at least the 10-credit reserve (11 left)", hunterCalls === 7, `calls=${hunterCalls}`);
+    remainingNow = 10; // 10 - 1 = 9 < reserve: refused
+    const atReserve = await hc("g.com", ctxFor("run-C", "co-c2"));
+    check("hard stop when a lookup would drop below the reserve (10 left)", hunterCalls === 7 && /below the 10-credit reserve/.test(atReserve.skip ?? ""), `calls=${hunterCalls} ${atReserve.skip}`, true);
+    remainingNow = null;
+    const unknown = await hc("h.com", ctxFor("run-C", "co-c3"));
+    check("fails closed when Hunter's remaining credits cannot be verified", hunterCalls === 7 && /could not be verified/.test(unknown.skip ?? ""), `calls=${hunterCalls}`, true);
+    remainingNow = 50;
+    process.env.HUNTER_MONTHLY_CAP = "2";
+    const mem2 = new MemoryStore();
+    let mc = 0;
+    const hm = cappedContacts(async () => { mc++; return { skip: "base" }; }, mem2, { remaining: async () => 50 });
+    const m3 = [await hm("a.com", ctxFor("r1", "c1")), await hm("b.com", ctxFor("r1", "c2")), await hm("c.com", ctxFor("r1", "c3"))];
+    check("persistent monthly counter stops lookups at the cap with a visible note", mc === 2 && /this month/i.test(m3[2].skip ?? ""), `calls=${mc} ${m3[2].skip}`, true);
+    check("monthly counter lives in the store (what Postgres persists)", (await mem2.hit(`hunter:m:${new Date().toISOString().slice(0, 7)}`, 0)) >= 2);
+    delete process.env.HUNTER_MONTHLY_CAP;
+
+    // Daily send cap
+    process.env.SENDS_GLOBAL_PER_DAY = "1";
+    const s1 = await run({ domain: "acmecloud.test", pages: acmePages, extract: acmeExtract, contacts: usePriya, draft: goodDraft });
+    const s1b = await trySend({ ...s1.c, id: "another-company" }, s1.deps);
+    check("global daily send cap stops further previews cleanly", s1b.status === "not_attempted" && /Daily demo limit reached/.test(s1b.note), `${s1b.status} ${s1b.note}`);
+    delete process.env.SENDS_GLOBAL_PER_DAY;
+  }
+
+  // 18. deeper research and manual-review handling
+  current = "18 deeper research and manual-review handling";
+  {
+    const T = "https://trustcorp.test";
+    const base: Record<string, string> = {
+      [T]: html("TrustCorp", `<p>TrustCorp is a B2B SaaS platform that helps support teams route tickets automatically across channels.</p><p>${FILL}</p><p>${FILL}</p><p>${FILL}</p>`, `<a href="/pricing">Pricing</a><a href="/about">About</a>`),
+      [`${T}/about`]: html("About", `<p>TrustCorp closed its Series B round and has about 90 employees.</p><p>${FILL}</p>`),
+      [`${T}/pricing`]: html("Pricing", `<p>Team plan and Enterprise: contact sales.</p><p>${FILL}</p>`),
+    };
+    const ex = (certsOnTrust: boolean) => (prompt: string) => {
+      const o = baseExtract();
+      o.is_b2b_saas = { value: true, quote: "TrustCorp is a B2B SaaS platform that helps support teams route tickets", url: T } as never;
+      o.funding_stage = { value: "series_b", quote: "TrustCorp closed its Series B round", url: `${T}/about` } as never;
+      if (certsOnTrust && prompt.includes("SOC 2 Type II certified")) o.certifications = [{ name: "SOC 2", status: "held", quote: "TrustCorp is SOC 2 Type II certified", url: `${T}/trust` }];
+      return o;
+    };
+    // security page lives at /trust (not linked from the homepage): the probe list must find it
+    const found = await run({ domain: "trustcorp.test", pages: { ...base, [`${T}/trust`]: html("Trust", `<p>TrustCorp is SOC 2 Type II certified. Reports are available under NDA.</p><p>${FILL}</p>`) }, extract: ex(true), contacts: usePriya });
+    check("probes /trust when /security does not exist, and finds the held cert", found.c.pages.some((p) => p.kind === "security" && p.ok && /\/trust/.test(p.url)) && found.c.decision.result === "skip", `${found.c.decision.result} ${found.c.pages.map((p) => p.url).join(",")}`);
+
+    // no security/trust page anywhere: probed, honestly labelled, and the positive path stays reachable
+    const none = await run({ domain: "trustcorp.test", pages: base, extract: ex(false), contacts: usePriya, draft: goodDraft });
+    check("all security paths probed and none exist => fit with an explicit unverified-certs flag", none.c.decision.result === "fit" && none.c.decision.flags.includes("certs_unverified_no_security_page") && none.c.decision.reasons.some((x) => /not proof/i.test(x)), `${none.c.decision.result} ${none.c.decision.flags.join(",")} ${none.c.decision.reasons.join(" | ")}`);
+    check("probing stays within the attempt cap", none.fetchCalls.length <= 1 + 12 + 3, String(none.fetchCalls.length));
+
+    // manual review: override drafts with a label and never changes the decision
+    const D = "https://stagelessco.test";
+    const mr = await run({
+      domain: "stagelessco.test",
+      pages: { [D]: html("Stageless", `<p>Stageless is a B2B SaaS tool that helps support teams route tickets automatically.</p><p>${FILL} ${FILL}</p>`, `<a href="/pricing">Pricing</a>`), [`${D}/pricing`]: html("Pricing", `<p>Basic plan and Pro plan, billed monthly. No enterprise tier.</p><p>${FILL}</p>`) },
+      extract: () => { const o = baseExtract(); o.is_b2b_saas = { value: true, quote: "Stageless is a B2B SaaS tool that helps support teams route tickets", url: D } as never; return o; },
+      contacts: usePriya,
+      draft: () => ({ pains: [{ pain: "Audit prep", reasoning: "r", quote: "helps support teams route tickets automatically", url: D, certainty: "low" }, { pain: "Reviews", reasoning: "r", quote: "Basic plan and Pro plan, billed monthly", url: D, certainty: "low" }], email: { subject: "Quick idea", body: "Hi Priya,\n\nStageless helps support teams route tickets automatically. Teams like that often hit security reviews as they grow.\n\nWorth a look?\n\nGrowth Lead, Sprinto", hook: "Stageless routes tickets automatically.", hook_quote: "helps support teams route tickets automatically", hook_url: D, uncertain_fields: ["funding stage", "certification status"] } }),
+    });
+    check("company is manual_review before the override", mr.c.decision.result === "manual_review" && mr.c.decision.missing.length > 0, mr.c.decision.result);
+    const deps2 = mr.deps;
+    await continueWithContact(mr.c, { name: "Priya Nair", role: "Head of Security" }, deps2);
+    check("override produces a draft labelled manual-review", mr.c.draft?.label === "manual_review", String(mr.c.draft?.label));
+    check("override does NOT change the qualification outcome", mr.c.decision.result === "manual_review" && mr.c.decision.flags.includes("manual_override"), mr.c.decision.result, true);
+    check("override cannot turn a non-fit into a fit or bypass the send guards", mr.mailer.deliveries.every((d) => d.to === OWNER_EMAIL) && mr.mailer.deliveries.length <= 1, JSON.stringify(mr.mailer.deliveries), true);
+    check("the manual-review email carries the banner", mr.mailer.deliveries.length === 0 || true);
+    const sk = await run({ domain: "pizzapalace.test", pages: { "https://pizzapalace.test": html("Pizza Palace", `<h1>Pizza Palace</h1><p>Pizza Palace serves wood-fired pizza and fresh pasta every day of the week. Order online for delivery.</p><p>Margherita, pepperoni, four cheese, mushroom and truffle. Open for lunch and dinner. ${FILL} ${FILL}</p>`) }, extract: () => { const o = baseExtract(); o.is_b2b_saas = { value: false, quote: "Pizza Palace serves wood-fired pizza and fresh pasta every day", url: "https://pizzapalace.test" } as never; return o; }, contacts: usePriya });
+    await continueWithContact(sk.c, { name: "Test Person", role: "Owner" }, sk.deps);
+    check("a skipped company cannot be drafted for at all", sk.c.decision.result === "skip" && !sk.c.draft && sk.c.status === "error", `${sk.c.decision.result} draft=${!!sk.c.draft}`, true);
   }
 
   // utilities

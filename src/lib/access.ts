@@ -65,3 +65,9 @@ export function verifySigned(signed: string): string | null {
   const raw = signed.slice(0, i);
   return safeEq(signed.slice(i + 1), mac(ownerKey()!, `sprinto-state:${raw}`)) ? raw : null;
 }
+
+/** A run is readable without the owner session only if a visitor created it (public), and only by its unguessable id. Everything else is private. */
+export function canAccessRun(req: Request, run: { public?: boolean; owner?: boolean } | null): boolean {
+  if (!run) return false;
+  return run.public === true || isOwner(req);
+}

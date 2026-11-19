@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { ownerOnly } from "@/lib/access";
+import { canAccessRun } from "@/lib/access";
 import { allowAttempt, limits } from "@/lib/limits";
 import { continueWithContact, liveDeps, stripPageText } from "@/lib/pipeline";
 
@@ -8,12 +8,11 @@ export const maxDuration = 300;
 
 /** Lets the user supply a real contact when Hunter has no key or no match. The contact is never emailed. */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const denied = ownerOnly(req);
-  if (denied) return denied;
   const { id } = await ctx.params;
   const deps = liveDeps();
   const c = await deps.store.getCompany(id);
-  if (!c) return NextResponse.json({ error: "Company record not found." }, { status: 404 });
+  const run = c ? await deps.store.getRun(c.runId) : null;
+  if (!c || !canAccessRun(req, run)) return NextResponse.json({ error: "Company record not found. Start a new run." }, { status: 404 });
   if (!(await allowAttempt(deps.store, "contact", id, limits.contactAttempts))) return NextResponse.json({ error: "Too many attempts for this company." }, { status: 429 });
   let body: { name?: unknown; role?: unknown; email?: unknown };
   try {
