@@ -13,6 +13,11 @@ import { allowAttempt, allowDiscover, allowRun, gateRun, limits, publicAllowance
 import { discoverDomains } from "../src/lib/discover";
 import { open as unseal, seal } from "../src/lib/secrets";
 import { parseFacts } from "../src/lib/extract";
+import { assumesHeldCert, certBasis, validateDraft } from "../src/lib/draft";
+import { clientIp, hashIp } from "../src/lib/limits";
+import { COUNTER_RETENTION_MS, makeSqliteStore } from "../src/lib/store";
+import { qualify } from "../src/lib/qualify";
+import { emptyFacts } from "../src/lib/extract";
 import { canAccessRun, checkOwnerKey, isOwner, issueOwnerCookie, OWNER_COOKIE, ownerOnly, signValue, verifySigned } from "../src/lib/access";
 import { gmailStatus, resolveRefreshToken, storeRefreshToken } from "../src/lib/gmail";
 
@@ -683,6 +688,100 @@ async function main() {
     const full = await gateRun(st, { owner: false, ip: "6.6.6.6", companies: 1, now: t });
     check("public daily cap still refuses with the clean message", !full.ok && /Daily demo limit reached.*tomorrow/.test(full.reason ?? ""), full.reason ?? "");
     check("allowance reports honest reset times", before.dailyResetsAtUtc === "2026-11-20T00:00:00.000Z" && before.hourlyResetsAtUtc === "2026-11-19T11:00:00.000Z", `${before.dailyResetsAtUtc} ${before.hourlyResetsAtUtc}`);
+  }
+
+  // 22. certification ambiguity
+  current = "22 ambiguous certification mentions route to manual review";
+  {
+    const pagesText = (t: string) => [{ url: "https://amb.test/", kind: "pricing", text: `${t} plus enough other text about the product to be long enough for any check here.` }];
+    const factsWith = (status: "held" | "in_progress" | "mentioned", quote: string) => {
+      const raw = { ...baseExtract(), is_b2b_saas: { value: true, quote: "Amb is a B2B SaaS platform for teams", url: "https://amb.test/" }, funding_stage: { value: "series_a", quote: "Amb raised a Series A round", url: "https://amb.test/" }, certifications: [{ name: "SOC 2", status, quote, url: "https://amb.test/" }] };
+      const text = `Amb is a B2B SaaS platform for teams. Amb raised a Series A round. ${quote}. ${FILL} ${FILL} ${FILL}`;
+      return parseFacts(raw as never, [{ url: "https://amb.test/", kind: "pricing", text }]).facts;
+    };
+    const ctx = (over: Partial<Parameters<typeof qualify>[1]> = {}) => ({ homepageOk: true, totalChars: 5000, fetchedKinds: ["home", "pricing", "security"], exhausted: false, ...over });
+    const pkg = qualify(factsWith("held", "SOC 2 and enterprise security"), ctx());
+    check("'SOC 2 and enterprise security' (plan packaging) => manual_review, not fit", pkg.result === "manual_review" && pkg.missing.includes("cert_status"), `${pkg.result} ${pkg.missing}`, true);
+    check("the reason quotes the mention and explains why it does not resolve status", /ambiguous/i.test(pkg.reasons.join(" ")) && /SOC 2 and enterprise security/.test(pkg.reasons.join(" ")) && /does not prove/i.test(pkg.reasons.join(" ")), pkg.reasons.join(" | "));
+    const help = qualify(factsWith("mentioned", "We help teams get SOC 2 ready"), ctx());
+    check("a 'we help you get SOC 2' mention is ambiguous too", help.result === "manual_review", help.result, true);
+    const before = qualify(factsWith("mentioned", "SOC 2 and enterprise security"), ctx({ fetchedKinds: ["home", "pricing"] }));
+    check("before the security page is checked, an ambiguous mention triggers research (not an instant verdict)", before.result === "needs_research" && before.missing.includes("certs"), `${before.result} ${before.missing}`);
+    const exhaustedQ = qualify(factsWith("mentioned", "SOC 2 and enterprise security"), ctx({ fetchedKinds: ["home", "pricing"], exhausted: true }));
+    check("budget exhausted with an ambiguous mention => manual_review that includes the ambiguity", exhaustedQ.result === "manual_review" && /ambiguous/i.test(exhaustedQ.reasons.join(" ")), exhaustedQ.reasons.join(" | "));
+    const heldQ = qualify(factsWith("held", "We are SOC 2 Type II certified"), ctx());
+    check("affirmative held wording still skips", heldQ.result === "skip", heldQ.result, true);
+    const prog = qualify(factsWith("in_progress", "We are preparing for SOC 2 Type II"), ctx());
+    check("an explicit 'preparing for SOC 2' (not held) is a fit", prog.result === "fit", `${prog.result} ${prog.reasons.join("|")}`);
+    const none = qualify({ ...factsWith("mentioned", "x"), certifications: [] }, ctx());
+    check("no certification claim anywhere in the probed corpus is a fit", none.result === "fit", none.result);
+    void pagesText; void emptyFacts;
+  }
+
+  // 23. draft must not assume a held certification
+  current = "23 draft never assumes a held certification";
+  {
+    const contact = { name: "Priya Nair", role: "Head of Security", source: "manual" as const, why: "t" };
+    const D = "https://d.test/";
+    const pages = [{ url: D, kind: "home", text: "Dtest builds scheduling software for clinics and many enterprise buyers ask vendors about SOC 2 during procurement reviews. Enterprise plan includes SOC 2 and enterprise security." }];
+    const mk = (subject: string, body: string, hook = "Enterprise buyers ask vendors about SOC 2 during procurement reviews.") => ({
+      pains: [{ pain: "Procurement reviews", reasoning: "r", quote: "many enterprise buyers ask vendors about SOC 2 during procurement reviews", url: D, certainty: "medium" }, { pain: "Questionnaires", reasoning: "r", quote: "Dtest builds scheduling software for clinics", url: D, certainty: "low" }],
+      email: { subject, body, hook, hook_quote: "many enterprise buyers ask vendors about SOC 2 during procurement reviews", hook_url: D, uncertain_fields: [] },
+    });
+    const bad = validateDraft(mk("SOC 2 maintenance for Dtest", "Hi Priya,\n\nMany teams struggle with maintaining SOC 2 evidence year-round and renewing their report.\n\nOpen to a chat?\n\nGrowth Lead, Sprinto"), contact, pages);
+    check("a 'SOC 2 maintenance' draft is flagged as assuming a held cert and cannot be sent", bad.draft.status !== "ready" && bad.draft.problems.some((p) => /assumes the company already holds/.test(p)), `${bad.draft.status} ${bad.draft.problems.join("|")}`, true);
+    const good = validateDraft(mk("Enterprise buyers asking about SOC 2", "Hi Priya,\n\nEnterprise buyers keep asking vendors about SOC 2 during procurement reviews, and that can stall deals before security even signs off.\n\nSprinto helps teams get through those reviews faster. Open to a short chat?\n\nGrowth Lead, Sprinto"), contact, pages);
+    check("a draft about certification pressure is accepted", good.draft.status === "ready" && good.draft.problems.length === 0, `${good.draft.status} ${good.draft.problems.join("|")}`);
+    for (const t of ["maintain your SOC 2", "SOC 2 maintenance", "renew your certification", "your existing SOC 2 report", "already SOC 2 compliant", "recertification", "keep your SOC 2 current"]) {
+      if (!assumesHeldCert(t)) check(`held-cert phrase detected: ${t}`, false, "not detected", true);
+    }
+    check("held-cert phrases are detected", assumesHeldCert("SOC 2 maintenance") && assumesHeldCert("maintain your SOC 2") && assumesHeldCert("your existing SOC 2 report"), "", true);
+    check("normal pressure wording is not flagged", !assumesHeldCert("buyers ask for SOC 2 in procurement reviews and security questionnaires") && !assumesHeldCert("preparing for SOC 2 Type II audit window"));
+    const f = emptyFacts();
+    check("prompt basis: no claim found => do not assume they hold one", /Do not assume they hold one/.test(certBasis(f)));
+    check("prompt basis: manual review => unresolved, no assumption either way", /UNRESOLVED/.test(certBasis(f, "manual_review")));
+    // end to end: a model that keeps assuming a held cert never gets a ready draft or a send
+    const loop = await run({ domain: "acmecloud.test", pages: acmePages, extract: acmeExtract, contacts: usePriya, draft: () => { const g = goodDraft(); g.email.subject = "SOC 2 maintenance for Acme Cloud"; g.email.body = "Hi Priya,\n\nMaintaining SOC 2 evidence is a grind and renewals are close.\n\nWorth a look?\n\nGrowth Lead, Sprinto"; return g; } });
+    check("pipeline: a held-cert-assuming draft is never sent", loop.mailer.deliveries.length === 0 && loop.c.draft?.status !== "ready", `${loop.c.draft?.status} sent=${loop.mailer.deliveries.length}`, true);
+    check("pipeline: one corrective retry was made", loop.counts.draft === 2, String(loop.counts.draft));
+  }
+
+  // 24. visitor IP privacy and counter retention
+  current = "24 IP hashing and counter retention";
+  {
+    process.env.IP_HASH_SALT = "test-salt-aaaa";
+    const req = (ip: string) => new Request("https://x.test/", { headers: { "x-forwarded-for": ip } });
+    const a1 = clientIp(req("203.0.113.9")), a2 = clientIp(req("203.0.113.9")), b = clientIp(req("198.51.100.7"));
+    check("client id is a stable hash, never the raw IP", a1 === a2 && a1 !== b && !a1.includes("203.0.113") && /^ip_[0-9a-f]{16}$/.test(a1), a1);
+    process.env.IP_HASH_SALT = "test-salt-bbbb";
+    check("a different salt gives a different hash (not reversible without the secret)", clientIp(req("203.0.113.9")) !== a1);
+    delete process.env.IP_HASH_SALT;
+    // keys written by the limiter contain no raw IP
+    const ms = new MemoryStore();
+    process.env.IP_HASH_SALT = "test-salt-aaaa";
+    await allowRun(ms, clientIp(req("203.0.113.9")));
+    await allowDiscover(ms, clientIp(req("203.0.113.9")));
+    check("limiter counter keys contain no raw IP address", [...ms.counters.keys()].every((k) => !/\d+\.\d+\.\d+\.\d+/.test(k)), [...ms.counters.keys()].join(","), true);
+    delete process.env.IP_HASH_SALT;
+    // retention on a real SQL store: old rows pruned, live windows and Hunter keys kept
+    const file = `/private/tmp/claude-501/sprinto-logs/retention-${Date.now()}.db`;
+    const sql = makeSqliteStore(file);
+    const day = new Date().toISOString().slice(0, 10), hr = new Date().toISOString().slice(0, 13);
+    await sql.hit(`runs:d:${day}:all`, 3); // live daily window
+    await sql.hit(`runs:h:${hr}:ip_live`, 2); // live hourly window
+    await sql.hit("runs:h:2026-11-10T08:ip_old", 1);
+    await sql.hit("gemini:d:2026-11-10", 5);
+    await sql.hit("hunter:m:2026-10", 7); // old month key but exempt
+    const old = new Date(Date.now() - COUNTER_RETENTION_MS - 3600_000).toISOString();
+    await sql.rawExec("UPDATE counters SET updated_at = ? WHERE k IN ('runs:h:2026-11-10T08:ip_old','gemini:d:2026-11-10','hunter:m:2026-10')", [old]);
+    (sql as unknown as { lastPrune: number }).lastPrune = 0; // force the next write to prune
+    await sql.hit("trigger:write", 1);
+    const left = (await sql.rawExec("SELECT k, n FROM counters ORDER BY k")).map((r) => `${r.k}=${r.n}`);
+    check("rows idle over 48h are pruned on write", !left.some((k) => k.startsWith("runs:h:2026-11-10") || k.startsWith("gemini:d:2026-11-10")), left.join(","), true);
+    check("live daily and hourly windows are untouched (values preserved)", left.includes(`runs:d:${day}:all=3`) && left.includes(`runs:h:${hr}:ip_live=2`), left.join(","), true);
+    check("Hunter month key is exempt from pruning", left.includes("hunter:m:2026-10=7"), left.join(","), true);
+    const { rmSync } = await import("node:fs");
+    rmSync(file, { force: true });
   }
 
   // utilities

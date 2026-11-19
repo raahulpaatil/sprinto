@@ -276,7 +276,7 @@ export async function draftAndSend(c: CompanyRecord, deps: Deps) {
   if (!c.contact || !c.facts) throw new Error("Cannot draft without a contact and facts.");
   c.stage = "draft";
   const pages = pageInputs(c);
-  const { pains, draft } = await writeDraft(c.contact, c.facts, c.domain, pages, deps.llm);
+  const { pains, draft } = await writeDraft(c.contact, c.facts, c.domain, pages, deps.llm, c.decision.result);
   if (c.decision.result === "manual_review") draft.label = "manual_review";
   c.pains = pains;
   c.draft = draft;

@@ -77,7 +77,16 @@ export function qualify(f: CompanyFacts, ctx: QualifyCtx): Qualification {
   if (f.is_b2b_saas.value === null) missing.push("saas");
   const securityPageFetched = ctx.fetchedKinds.includes("security");
   const securityChecked = securityPageFetched || !!ctx.securityExhausted;
-  if (!securityChecked && f.certifications.length === 0) missing.push("certs");
+  // A certification mention that does not say whether THIS company holds it (a plan feature, a "SOC 2 and enterprise security"
+  // bullet, "we help you get SOC 2") is ambiguous. in_progress is explicit not-held evidence; held already skipped above.
+  const resolvedCerts = new Set(f.certifications.filter((c) => c.status !== "mentioned").map((c) => c.name));
+  const ambiguous = f.certifications.filter((c) => c.status === "mentioned" && HELD_CERTS.includes(c.name) && !resolvedCerts.has(c.name));
+  const ambiguityReasons = () =>
+    ambiguous.map(
+      (c) =>
+        `Certification status is ambiguous: the site mentions ${c.name} ("${c.evidence.quote}", ${c.evidence.url}) but not in a way that says whether the company itself holds it. It may be a plan feature, a marketing line or a held certification. A qualified prospect must be under certification pressure WITHOUT holding it, and an ambiguous mention does not prove that, so a person needs to check.`,
+    );
+  if (!securityChecked && (f.certifications.length === 0 || ambiguous.length > 0)) missing.push("certs");
   const hasStageEvidence = !!stage || proxies.filter((p) => !p.startsWith("named")).length >= 2;
   if (!hasStageEvidence) missing.push("stage");
 
@@ -86,7 +95,14 @@ export function qualify(f: CompanyFacts, ctx: QualifyCtx): Qualification {
     reasons.push(`Research budget exhausted while still missing: ${missing.join(", ")}.`);
     if (missing.includes("saas")) reasons.push("Could not confirm the company is B2B SaaS.");
     if (missing.includes("stage")) reasons.push("Stage unknown: no named funding stage and fewer than two stage proxies.");
-    if (missing.includes("certs")) reasons.push("Could not check certification status (no security/trust page found).");
+    if (missing.includes("certs") && ambiguous.length === 0) reasons.push("Could not check certification status (no security/trust page found).");
+    reasons.push(...ambiguityReasons());
+    if (ambiguous.length > 0 && !missing.includes("cert_status")) missing.push("cert_status");
+    return done("manual_review");
+  }
+  if (ambiguous.length > 0) {
+    reasons.push(...ambiguityReasons());
+    missing.push("cert_status");
     return done("manual_review");
   }
 

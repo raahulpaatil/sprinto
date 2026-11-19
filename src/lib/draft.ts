@@ -11,6 +11,7 @@ Hard rules:
 - Use ONLY the facts and page text provided. Do not invent customers, numbers, funding, headcount, deadlines or events.
 - Facts marked UNCERTAIN or missing must NOT be stated as facts. List them in "uncertain_fields" and write around them.
 - Pains: exactly two, chosen from things like audit preparation effort, enterprise-customer security reviews / certification pressure, security questionnaires, scaling compliance with headcount. Each pain needs "quote" (VERBATIM from the page text) and "url" of the page, plus short "reasoning" linking the quote to the pain. If the evidence only weakly supports it, set certainty to "low".
+- NEVER say, assume or imply that the company holds, has completed, maintains, renews or is re-certifying SOC 2, ISO 27001 or GDPR. They were qualified as NOT holding a certification (or their status is unresolved), so write about the PRESSURE to get certified: enterprise buyers asking for it, procurement and security reviews, questionnaires, deal friction. Do not use words like "maintain", "maintenance", "renew", "keep your SOC 2", "your existing/current certification".
 - Email: under 120 words, plain text, addressed by first name, one specific hook that refers to something concrete from the page text, one clear low-pressure ask. No flattery, no fake familiarity, no claims about their funding unless a verified fact says so.
 - "hook" is the one-sentence hook. "hook_quote" is a VERBATIM excerpt from the page text that the hook is based on; "hook_url" is its page.
 Return ONLY JSON:
@@ -22,7 +23,20 @@ function factLine(label: string, f: { value: unknown; confidence: string; eviden
   return `- ${label}: ${String(f.value)} [${f.confidence}] evidence: "${f.evidence.quote}" (${f.evidence.url})`;
 }
 
-export function draftPrompt(contact: Contact, facts: CompanyFacts, domain: string, pages: PageInput[], feedback?: string): string {
+/** One sentence telling the model what the qualification actually established about certifications. */
+export function certBasis(facts: CompanyFacts, status?: string): string {
+  const prog = facts.certifications.filter((c) => c.status === "in_progress");
+  if (prog.length) return `The company says it is PREPARING for ${prog.map((c) => c.name).join(", ")} (not yet held): "${prog[0].evidence.quote}". Write about the effort and pressure of getting there, not about maintaining anything.`;
+  if (facts.certifications.length > 0 || status === "manual_review") return "Certification status is UNRESOLVED: do not state or assume whether they hold any certification. Write only about general certification pressure from enterprise buyers.";
+  return "No certification claim was found anywhere on the pages checked. Do not assume they hold one. Write about the pressure to get certified.";
+}
+
+/** True if text assumes the prospect already holds / maintains a certification, which the qualification basis contradicts. */
+export function assumesHeldCert(text: string): boolean {
+  return /\b(maintain(s|ing|ed)?|maintenance|renew(s|ing|al|als)?|re-?certif\w*|recertif\w*|keep(ing)? (your |the )?(soc|iso|gdpr)|sustain(ing)? (your |the )?(soc|iso|gdpr)|your (existing|current|latest) (soc|iso|gdpr|certif\w*|audit report|report)|already (certified|compliant|soc|iso|gdpr)|since (you are|you\u2019re|you're) (soc|iso|gdpr|certified|compliant)|annual (soc|iso|audit|recertif\w*)|(soc 2|iso 27001|gdpr)[^.]{0,40}\b(upkeep|ongoing compliance|continuous compliance)\b)/i.test(text);
+}
+
+export function draftPrompt(contact: Contact, facts: CompanyFacts, domain: string, pages: PageInput[], feedback?: string, status?: string): string {
   const certs = facts.certifications.length
     ? facts.certifications.map((c) => `- ${c.name}: ${c.status} evidence: "${c.evidence.quote}" (${c.evidence.url})`).join("\n")
     : "- none found on the pages checked";
@@ -37,6 +51,7 @@ export function draftPrompt(contact: Contact, facts: CompanyFacts, domain: strin
     factLine("open roles", facts.open_roles),
     factLine("enterprise pricing tier", facts.enterprise_pricing),
     `CERTIFICATIONS:\n${certs}`,
+    `CERTIFICATION BASIS (binding): ${certBasis(facts, status)}`,
     `SIGNALS:\n${signals}`,
     feedback ? `FIX THESE PROBLEMS FROM YOUR LAST ATTEMPT: ${feedback}` : "",
     `PAGE TEXT (quotes must be copied from here exactly):`,
@@ -86,6 +101,7 @@ export function validateDraft(
   });
   if (!hookWhere) problems.push("The email hook is not grounded: its quote was not found on any fetched page.");
   if (!body || !subject) problems.push("Subject or body is empty.");
+  if (assumesHeldCert(`${subject} ${body} ${hook}`)) problems.push("The email assumes the company already holds or maintains a certification (wording like maintain/renew/existing certification). The qualification basis says they do not hold one or it is unresolved, so the draft must talk about certification pressure instead.");
   const first = contact.name.split(" ")[0];
   if (body && !norm(body).includes(norm(first))) problems.push(`Email does not address ${first} by name.`);
   if (body.split(/\s+/).length > 170) problems.push("Email is longer than 170 words.");
@@ -100,7 +116,7 @@ export function validateDraft(
   const uncertain = Array.isArray(e.uncertain_fields) ? e.uncertain_fields.filter((x): x is string => typeof x === "string").slice(0, 8) : [];
   const hookGrounded = !!hookWhere;
   const painsOk = pains.length === 2 && pains.every((p) => p.grounded);
-  const status: Draft["status"] = !hookGrounded ? "ungrounded" : problems.length > 0 || !painsOk ? "needs_review" : "ready";
+  const status: Draft["status"] = !hookGrounded ? "ungrounded" : problems.length > 0 || !painsOk ? "needs_review" : "ready"; // any problem (including a held-cert assumption) blocks sending
   return {
     pains,
     draft: {
@@ -123,12 +139,13 @@ export async function writeDraft(
   domain: string,
   pages: PageInput[],
   llm: LLM,
+  decision?: string,
 ): Promise<{ pains: Pain[]; draft: Draft }> {
-  let result = validateDraft(await llm({ kind: "draft", system: DRAFT_SYSTEM, prompt: draftPrompt(contact, facts, domain, pages), temperature: 0.4 }), contact, pages);
+  let result = validateDraft(await llm({ kind: "draft", system: DRAFT_SYSTEM, prompt: draftPrompt(contact, facts, domain, pages, undefined, decision), temperature: 0.4 }), contact, pages);
   if (result.draft.status !== "ready") {
     const feedback = result.draft.problems.join(" ");
     const retry = validateDraft(
-      await llm({ kind: "draft", system: DRAFT_SYSTEM, prompt: draftPrompt(contact, facts, domain, pages, feedback), temperature: 0.2 }),
+      await llm({ kind: "draft", system: DRAFT_SYSTEM, prompt: draftPrompt(contact, facts, domain, pages, feedback, decision), temperature: 0.2 }),
       contact,
       pages,
     );

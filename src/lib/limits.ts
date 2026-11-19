@@ -1,6 +1,7 @@
 // Abuse protection for a public, no-login deployment. Counters live in the same store as everything else, so
 // they hold across serverless instances when storage is durable. A normal reviewer doing a few runs is never affected.
 
+import { createHash } from "node:crypto";
 import type { Store } from "./store";
 
 const num = (v: string | undefined, d: number) => {
@@ -24,10 +25,16 @@ export const limits = {
 };
 export const MAX_DOMAINS_PER_RUN = 10;
 
-/** The client address as seen by the platform. Vercel overwrites x-forwarded-for, so the first entry is the real client. */
+/** Salted hash of a visitor IP (IP_HASH_SALT). Counter keys only ever contain this, never the raw address. */
+export function hashIp(ip: string): string {
+  const salt = process.env.IP_HASH_SALT?.trim() || process.env.OWNER_KEY?.trim() || "sprinto-default-salt";
+  return `ip_${createHash("sha256").update(`${salt}|${ip}`).digest("hex").slice(0, 16)}`;
+}
+
+/** The client as seen by the platform, already hashed. Vercel overwrites x-forwarded-for, so the first entry is the real client. */
 export function clientIp(req: Request): string {
   const v = req.headers.get("x-vercel-forwarded-for") ?? req.headers.get("x-forwarded-for") ?? req.headers.get("x-real-ip") ?? "local";
-  return v.split(",")[0].trim().slice(0, 64) || "local";
+  return hashIp(v.split(",")[0].trim().slice(0, 64) || "local");
 }
 
 const iso = (d: Date) => d.toISOString();

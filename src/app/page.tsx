@@ -23,6 +23,7 @@ type Candidate = { domain: string; name: string; why: string };
 
 const LS_RUN = "sprinto:lastRun";
 const MISSING_TEXT: Record<string, string> = {
+  cert_status: "Certification status is ambiguous: a mention was found that does not say whether the company itself holds the certification (see the reason above for the exact quote). A person needs to check its security or trust page.",
   saas: "B2B SaaS status: the pages checked do not clearly say what the company sells or to whom.",
   stage: "Funding stage: no named stage (Series A-C) on the site and fewer than two stage proxies (5+ open roles, enterprise pricing tier).",
   certs: "Certification status: no security or trust page was found at the standard paths, so SOC 2 / ISO 27001 / GDPR could not be checked.",

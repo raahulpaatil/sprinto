@@ -81,17 +81,33 @@ const schemaFor = (P: string) => [
   `CREATE TABLE IF NOT EXISTS ${P}companies (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, domain TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, json TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS companies_run_idx ON ${P}companies (run_id)`,
   `CREATE TABLE IF NOT EXISTS ${P}sends (key TEXT PRIMARY KEY, company_id TEXT NOT NULL, state TEXT NOT NULL, message_id TEXT, updated_at TEXT NOT NULL, detail TEXT)`,
-  `CREATE TABLE IF NOT EXISTS ${P}counters (k TEXT PRIMARY KEY, n INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS ${P}counters (k TEXT PRIMARY KEY, n INTEGER NOT NULL, updated_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS ${P}secrets (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 ];
 
-class SqlStore implements Store {
+/** Counter rows idle longer than this are deleted (Hunter keys are exempt: they track a monthly credit window and hold no IPs). */
+export const COUNTER_RETENTION_MS = 48 * 3600 * 1000;
+const PRUNE_EVERY_MS = 10 * 60 * 1000;
+
+export class SqlStore implements Store {
   constructor(public kind: string, public durable: boolean, private exec: Exec, private P = "") {}
+  private lastPrune = 0;
+  /** Test/maintenance access to the underlying executor. */
+  rawExec(sql: string, args: unknown[] = []) {
+    return this.q(sql, args);
+  }
   private ready: Promise<void> | null = null;
   private init() {
     if (!this.ready) {
       this.ready = (async () => {
         for (const stmt of schemaFor(this.P)) await this.exec(stmt);
+        // Migration for databases created before counters had a timestamp. Ignored if the column already exists.
+        try {
+          await this.exec(`ALTER TABLE ${this.P}counters ADD COLUMN ${this.P ? "IF NOT EXISTS " : ""}updated_at TEXT`);
+        } catch {
+          /* column already there */
+        }
+        await this.exec(`UPDATE ${this.P}counters SET updated_at = ? WHERE updated_at IS NULL`, [new Date().toISOString()]);
       })();
     }
     return this.ready;
@@ -169,10 +185,17 @@ class SqlStore implements Store {
     );
   }
   async hit(key: string, by: number) {
+    const now = new Date();
     const r = await this.q(
-      `INSERT INTO ${this.P}counters AS c (k, n) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET n = c.n + excluded.n RETURNING n`,
-      [key, by],
+      `INSERT INTO ${this.P}counters AS c (k, n, updated_at) VALUES (?, ?, ?) ON CONFLICT (k) DO UPDATE SET n = c.n + excluded.n, updated_at = excluded.updated_at RETURNING n`,
+      [key, by, now.toISOString()],
     );
+    // Retention: whenever counters are written (at most every 10 minutes per instance), drop rows idle for 48h. Live windows
+    // (the current hour/day, written within the last 48h) are never touched, and neither are the Hunter month/run/company keys.
+    if (now.getTime() - this.lastPrune > PRUNE_EVERY_MS) {
+      this.lastPrune = now.getTime();
+      await this.q(`DELETE FROM ${this.P}counters WHERE updated_at < ? AND k NOT LIKE 'hunter:%'`, [new Date(now.getTime() - COUNTER_RETENTION_MS).toISOString()]).catch(() => undefined);
+    }
     return Number(r[0]?.n ?? by);
   }
 }
@@ -200,12 +223,16 @@ export function getStore(): Store {
     return cached;
   }
   const onVercel = !!process.env.VERCEL;
-  const file = onVercel ? "/tmp/sprinto.db" : `${process.cwd()}/data/sprinto.db`;
+  cached = makeSqliteStore(onVercel ? "/tmp/sprinto.db" : `${process.cwd()}/data/sprinto.db`, !onVercel, !onVercel);
+  return cached;
+}
+
+export function makeSqliteStore(file: string, durable = true, ensureDataDir = false): SqlStore {
   let clientP: Promise<import("@libsql/client").Client> | null = null;
-  cached = new SqlStore("sqlite", !onVercel, async (sql, args = []) => {
+  return new SqlStore("sqlite", durable, async (sql, args = []) => {
     if (!clientP) {
       clientP = (async () => {
-        if (!onVercel) {
+        if (ensureDataDir) {
           const { mkdirSync } = await import("node:fs");
           mkdirSync(`${process.cwd()}/data`, { recursive: true });
         }
@@ -217,5 +244,4 @@ export function getStore(): Store {
     const rs = await client.execute({ sql, args: args as never[] });
     return rs.rows.map((r) => ({ ...r })) as Row[];
   });
-  return cached;
 }
