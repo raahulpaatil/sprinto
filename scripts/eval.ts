@@ -18,7 +18,7 @@ import { clientIp, hashIp } from "../src/lib/limits";
 import { COUNTER_RETENTION_MS, makeSqliteStore } from "../src/lib/store";
 import { qualify } from "../src/lib/qualify";
 import { emptyFacts } from "../src/lib/extract";
-import { canAccessRun, checkOwnerKey, isOwner, issueOwnerCookie, OWNER_COOKIE, ownerOnly, signValue, verifySigned } from "../src/lib/access";
+import { canAccessRun } from "../src/lib/access";
 import { gmailStatus, resolveRefreshToken, storeRefreshToken } from "../src/lib/gmail";
 
 // ---------- tiny test framework ----------
@@ -107,7 +107,6 @@ async function run(sc: Scenario) {
   const mailer = sc.mailer ?? mailerFake();
   const deps: Deps = { fetcher: w.fetcher, llm, contacts, mailer, store, now: () => new Date() };
   const c = newCompany("run-1", `co-${sc.domain}`, sc.domain, true, new Date(), sc.expectedName);
-  c.owner = !sc.visitor;
   await processCompany(c, deps);
   return { c, deps, counts, mailer, fetchCalls: w.calls, store };
 }
@@ -488,46 +487,13 @@ async function main() {
     }
   }
 
-  // 16. owner gate
-  current = "16 owner gate";
+  // 17. run links, access and sends (one role, no sign-in)
+  current = "17 run links and send guards (single role)";
   {
-    const saved = process.env.OWNER_KEY;
-    const req = (cookie?: string) => new Request("https://x.test/api", { headers: cookie ? { cookie } : {} });
-    delete process.env.OWNER_KEY;
-    check("no OWNER_KEY configured: nobody is owner (fails closed)", !isOwner(req()) && !checkOwnerKey("anything") && issueOwnerCookie() === null && ownerOnly(req())?.status === 401, "", true);
-    process.env.OWNER_KEY = "test-owner-key-1234567890";
-    check("short key is rejected as misconfiguration", (() => { process.env.OWNER_KEY = "short"; const r = !checkOwnerKey("short"); process.env.OWNER_KEY = "test-owner-key-1234567890"; return r; })());
-    check("wrong key rejected, right key accepted", !checkOwnerKey("nope") && !checkOwnerKey("") && checkOwnerKey("test-owner-key-1234567890"));
-    const c = issueOwnerCookie()!;
-    check("valid session cookie is owner", isOwner(req(`${OWNER_COOKIE}=${c.value}`)) && ownerOnly(req(`${OWNER_COOKIE}=${c.value}`)) === null, "", true);
-    check("no cookie / visitor gets 401", ownerOnly(req())?.status === 401, "", true);
-    const [exp, sig] = c.value.split(".");
-    check("tampered signature rejected", !isOwner(req(`${OWNER_COOKIE}=${exp}.${sig.slice(0, -2)}xx`)), "", true);
-    check("forged longer expiry rejected", !isOwner(req(`${OWNER_COOKIE}=${Number(exp) + 99999}.${sig}`)), "", true);
-    const old = issueOwnerCookie(Date.now() - 13 * 3600 * 1000)!;
-    check("expired session rejected", !isOwner(req(`${OWNER_COOKIE}=${old.value}`)));
-    process.env.OWNER_KEY = "a-different-owner-key-0987654321";
-    check("session signed with another key rejected", !isOwner(req(`${OWNER_COOKIE}=${c.value}`)), "", true);
-    process.env.OWNER_KEY = "test-owner-key-1234567890";
-    const st = signValue("state~verifier");
-    check("signed OAuth state verifies", verifySigned(st) === "state~verifier");
-    check("forged OAuth state rejected", verifySigned("evil~verifier." + st.split(".").pop()) === null && verifySigned("state~verifier.AAAA") === null, "", true);
-    if (saved === undefined) delete process.env.OWNER_KEY; else process.env.OWNER_KEY = saved;
-  }
-
-  // 17. public access model
-  current = "17 public access model and isolation";
-  {
-    const saved = process.env.OWNER_KEY;
-    process.env.OWNER_KEY = "test-owner-key-1234567890";
-    const anon = new Request("https://x.test/api");
-    const owner = new Request("https://x.test/api", { headers: { cookie: `${OWNER_COOKIE}=${issueOwnerCookie()!.value}` } });
-    check("a visitor can read a public run", canAccessRun(anon, { public: true }));
-    check("a visitor cannot read an owner run", !canAccessRun(anon, { owner: true }), "", true);
-    check("a visitor cannot read a legacy run (no public flag)", !canAccessRun(anon, {}), "", true);
-    check("a visitor cannot read a missing run", !canAccessRun(anon, null));
-    check("the owner can read owner and legacy runs", canAccessRun(owner, { owner: true }) && canAccessRun(owner, {}));
-    if (saved === undefined) delete process.env.OWNER_KEY; else process.env.OWNER_KEY = saved;
+    const anyone = new Request("https://x.test/api");
+    check("anyone with the link can read a run created through the app", canAccessRun(anyone, { public: true }));
+    check("a run without the public flag (older private/owner runs) is not readable by anyone", !canAccessRun(anyone, {}) && !canAccessRun(anyone, { public: false }), "", true);
+    check("a missing run is not readable", !canAccessRun(anyone, null));
 
     // public sends are allowed but stay locked to the owner inbox and to one per company
     const pub = await run({ domain: "acmecloud.test", pages: acmePages, extract: acmeExtract, contacts: usePriya, draft: goodDraft, visitor: true });
@@ -662,32 +628,25 @@ async function main() {
     check("'working toward SOC 2' is not held", held("We are working toward SOC 2 this year") !== "held", "", true);
   }
 
-  // 21. owner vs public allowance
-  current = "21 owner runs are separate from the public allowance";
+  // 21. one shared budget for everyone
+  current = "21 one shared set of budgets (no owner counter)";
   {
     const st = new MemoryStore();
     const t = new Date("2026-11-19T10:15:00Z");
-    const day = "2026-11-19", hour = "2026-11-19T10";
-    // public already used 7 of 10 today (like the live state) and this IP used 1 of 3 this hour
-    for (let i = 0; i < 7; i++) await st.hit(`runs:d:${day}:all`, 1);
-    await st.hit(`runs:h:${hour}:9.9.9.9`, 1);
-    await st.hit(`companies:d:${day}:all`, 9);
-    const before = await publicAllowance(st, "9.9.9.9", t);
-    const ownerRes: boolean[] = [];
-    for (let i = 0; i < 21; i++) ownerRes.push((await gateRun(st, { owner: true, ip: "9.9.9.9", companies: 5, now: t })).ok);
-    const after = await publicAllowance(st, "9.9.9.9", t);
-    check("owner gets exactly 20 runs a day, the 21st is refused", ownerRes.slice(0, 20).every(Boolean) && !ownerRes[20] && limits.ownerRunsPerDay === 20, JSON.stringify(ownerRes.filter((x) => !x).length), true);
-    check("owner runs do not change the public global run counter", after.runsLeftToday === before.runsLeftToday && before.runsLeftToday === 3, `${before.runsLeftToday} -> ${after.runsLeftToday}`, true);
-    check("owner runs do not change the per-IP hourly counter", after.runsLeftThisHourForYou === before.runsLeftThisHourForYou && before.runsLeftThisHourForYou === 2, `${before.runsLeftThisHourForYou} -> ${after.runsLeftThisHourForYou}`, true);
-    check("owner runs do not consume the public companies allowance", after.companiesLeftToday === before.companiesLeftToday && before.companiesLeftToday === 31, `${before.companiesLeftToday} -> ${after.companiesLeftToday}`, true);
-    const vis = [];
-    for (let i = 0; i < 4; i++) vis.push((await gateRun(st, { owner: false, ip: "5.5.5.5", companies: 1, now: t })).ok);
-    const after2 = await publicAllowance(st, "5.5.5.5", t);
-    check("visitors still hit the 3/hour per-IP limit", vis.slice(0, 3).every(Boolean) && !vis[3], JSON.stringify(vis));
-    check("visitor runs do consume the public global counter and nothing else of the owner's", after2.runsLeftToday === 0 && (await st.hit(`runs:owner:d:${day}`, 0)) === 21, `${after2.runsLeftToday}`);
-    const full = await gateRun(st, { owner: false, ip: "6.6.6.6", companies: 1, now: t });
-    check("public daily cap still refuses with the clean message", !full.ok && /Daily demo limit reached.*tomorrow/.test(full.reason ?? ""), full.reason ?? "");
-    check("allowance reports honest reset times", before.dailyResetsAtUtc === "2026-11-20T00:00:00.000Z" && before.hourlyResetsAtUtc === "2026-11-19T11:00:00.000Z", `${before.dailyResetsAtUtc} ${before.hourlyResetsAtUtc}`);
+    const day = "2026-11-19";
+    const res: boolean[] = [];
+    for (let i = 0; i < 4; i++) res.push((await gateRun(st, { ip: "ip_a", companies: 2, now: t })).ok);
+    check("one IP gets exactly 3 runs an hour, the 4th is refused", res.slice(0, 3).every(Boolean) && !res[3], JSON.stringify(res), true);
+    const g = new MemoryStore();
+    let allowed = 0;
+    let last: { ok: boolean; reason?: string } = { ok: true };
+    for (let i = 0; i < 14; i++) { const r = await gateRun(g, { ip: `ip_${i}`, companies: 1, now: t }); if (r.ok) allowed++; else last = r; }
+    check("site-wide, exactly 10 runs a day are allowed, then the clean limit message", allowed === 10 && /Daily demo limit reached.*tomorrow/.test(last.reason ?? ""), `${allowed} ${last.reason}`, true);
+    check("there is no separate owner counter: nothing is ever written under runs:owner", [...st.counters.keys(), ...g.counters.keys()].every((k) => !k.startsWith("runs:owner")), [...g.counters.keys()].join(","), true);
+    check("a run consumes the shared run, per-IP and companies counters", (await st.hit(`runs:d:${day}:all`, 0)) === 3 && (await st.hit(`companies:d:${day}:all`, 0)) === 6, `${await st.hit(`runs:d:${day}:all`, 0)}`);
+    const a = await publicAllowance(g, "ip_x", t);
+    check("the page shows honest remaining limits and reset times", a.runsLeftToday === 0 && a.dailyResetsAtUtc === "2026-11-20T00:00:00.000Z" && a.hourlyResetsAtUtc === "2026-11-19T11:00:00.000Z", JSON.stringify(a));
+    check("nothing is unlimited: caps are 3/hour per IP, 10/day, 40 companies/day", limits.runsPerIpPerHour === 3 && limits.runsGlobalPerDay === 10 && limits.companiesGlobalPerDay === 40);
   }
 
   // 22. certification ambiguity

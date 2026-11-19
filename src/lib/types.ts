@@ -151,8 +151,6 @@ export interface CompanyRecord {
   /** Contact the user typed in up front; used only when Hunter finds nobody. */
   hintContact?: { name: string; role: string };
   sendEnabled: boolean;
-  /** Set server-side from the owner session at creation. Only owner companies can send or use unlimited Hunter lookups. */
-  owner?: boolean;
   status: CompanyStatus;
   stage: string;
   pages: PageRecord[];
@@ -178,10 +176,6 @@ export interface RunRecord {
   companyIds: string[];
   createdAt: string;
   note?: string;
-  /** Created by the signed-in owner (private: readable only with the owner session). */
-  owner?: boolean;
-  /** Audit flag: who started this run. */
-  startedBy?: "owner" | "visitor";
-  /** Created by a public visitor. Only public runs are readable without the owner session, and only by their unguessable id. */
+  /** Set on every run created through the app. Only runs with this flag are readable, and only through their own unguessable id. */
   public?: boolean;
 }

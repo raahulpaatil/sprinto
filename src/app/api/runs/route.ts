@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { isOwner } from "@/lib/access";
 import { normalizeDomain } from "@/lib/fetcher";
 import { clientIp, gateRun, MAX_DOMAINS_PER_RUN } from "@/lib/limits";
 import { newCompany, liveDeps, stripPageText } from "@/lib/pipeline";
@@ -23,10 +22,9 @@ function parseLines(input: unknown): { domain: string; name?: string; contactNam
   return out;
 }
 
-/** Public. Visitors are limited per IP and per day (free-tier protection); the owner keeps a separate ceiling. */
+/** No sign-in. One shared set of limits (per IP per hour, site-wide per day) protects the free-tier quotas. */
 export async function POST(req: Request) {
   const deps = liveDeps();
-  const owner = isOwner(req);
   let body: { domains?: unknown; send?: unknown; mode?: unknown };
   try {
     body = await req.json();
@@ -38,17 +36,15 @@ export async function POST(req: Request) {
   if (parsed.length > MAX_DOMAINS_PER_RUN) {
     return NextResponse.json({ error: `Please keep it to ${MAX_DOMAINS_PER_RUN} domains per run (you sent ${parsed.length}).` }, { status: 400 });
   }
-  const gate = await gateRun(deps.store, { owner, ip: clientIp(req), companies: parsed.length });
+  const gate = await gateRun(deps.store, { ip: clientIp(req), companies: parsed.length });
   if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 429, headers: { "retry-after": String(gate.retryAfterSec ?? 3600) } });
 
   const now = deps.now();
   const sendEnabled = body.send !== false;
-  const run: RunRecord = { id: randomUUID(), mode: body.mode === "discover" ? "discover" : "paste", sendEnabled, companyIds: [], createdAt: now.toISOString(), owner, public: !owner, startedBy: owner ? "owner" : "visitor" };
-  const companies = parsed.map((p, i) => {
-    const c = newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name, p.contactName && p.contactRole ? { name: p.contactName, role: p.contactRole } : undefined);
-    c.owner = owner;
-    return c;
-  });
+  const run: RunRecord = { id: randomUUID(), mode: body.mode === "discover" ? "discover" : "paste", sendEnabled, companyIds: [], createdAt: now.toISOString(), public: true };
+  const companies = parsed.map((p, i) =>
+    newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name, p.contactName && p.contactRole ? { name: p.contactName, role: p.contactRole } : undefined),
+  );
   run.companyIds = companies.map((c) => c.id);
   await deps.store.saveRun(run);
   for (const c of companies) await deps.store.saveCompany(c);

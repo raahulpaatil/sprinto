@@ -4,18 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CompanyRecord, Fact } from "@/lib/types";
 
 type Health = {
-  owner: boolean;
   sendReady?: boolean;
   contactLookup?: boolean;
-  // owner-only detail
   gemini?: boolean;
   hunter?: boolean;
   hunterAccount?: { plan: string | null; used: number | null; available: number | null; resetDate: string | null } | null;
-  gmail?: boolean;
-  gmailCanConnect?: boolean;
   store?: { kind: string; durable: boolean; ok: boolean };
-  usageToday?: { runs: number; ownerRuns?: number; companies: number; geminiCalls: number; sends: number; hunterThisMonth: number };
-  caps?: { ownerRunsPerDay?: number; runsGlobalPerDay: number; companiesGlobalPerDay: number; geminiDailyCallCap: number; hunterMonthlyCap: number; sendsGlobalPerDay: number };
+  usageToday?: { runs: number; companies: number; geminiCalls: number; sends: number; hunterThisMonth: number };
+  caps?: { runsGlobalPerDay: number; companiesGlobalPerDay: number; geminiDailyCallCap: number; hunterMonthlyCap: number; sendsGlobalPerDay: number };
   sendsOnlyTo?: string;
   allowance?: { runsLeftToday: number; runsDailyCap: number; runsLeftThisHourForYou: number; runsHourlyCap: number; companiesLeftToday: number; dailyResetsAtUtc: string; hourlyResetsAtUtc: string };
 };
@@ -437,12 +433,7 @@ export default function Home() {
 
   return (
     <main className="wrap">
-      <div className="co-head">
-        <h1>Sprinto</h1>
-        {health?.owner ? (
-          <span className="hint">Owner mode · <button className="secondary" onClick={async () => { await fetch("/api/owner/logout", { method: "POST" }); window.location.reload(); }}>Sign out</button></span>
-        ) : null}
-      </div>
+      <h1>Sprinto</h1>
       <p className="sub">
         Cold-outreach research assistant for Sprinto’s Growth Lead. Paste company domains (or discover them from the ICP). For each one it scrapes the site,
         extracts facts with cited evidence, qualifies against the ICP, finds a contact, drafts a grounded first email and sends a preview <b>only to the owner’s own inbox</b>.
@@ -454,23 +445,18 @@ export default function Home() {
           <>
             <span className={`chip ${health.contactLookup ? "ok" : "warn"}`}>Contact lookup {health.contactLookup ? "on" : "off: add contacts by hand"}</span>
             <span className={`chip ${health.sendReady ? "ok" : "warn"}`}>Preview email {health.sendReady ? "on: goes only to the owner’s inbox" : "not connected yet: drafts are shown, nothing is sent"}</span>
-            {!health.owner && health.allowance && (
+            {health.allowance && (
               <span className={`chip ${health.allowance.runsLeftToday > 0 && health.allowance.runsLeftThisHourForYou > 0 ? "" : "warn"}`}>
-                Public demo allowance: {health.allowance.runsLeftToday} of {health.allowance.runsDailyCap} runs left today (resets 00:00 UTC, 05:30 IST) · {health.allowance.runsLeftThisHourForYou} of {health.allowance.runsHourlyCap} left for you this hour
+                Demo limits: {health.allowance.runsLeftToday} of {health.allowance.runsDailyCap} runs left today (resets 00:00 UTC, 05:30 IST) · {health.allowance.runsLeftThisHourForYou} of {health.allowance.runsHourlyCap} left for you this hour
               </span>
             )}
-            {health.owner && (
-              <>
-                <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
-                {health.hunterAccount && (
-                  <span className="chip">Hunter {health.hunterAccount.plan ?? "plan ?"}: {health.hunterAccount.available !== null && health.hunterAccount.used !== null ? `${health.hunterAccount.available - health.hunterAccount.used} of ${health.hunterAccount.available} left` : "usage unknown"}</span>
-                )}
-                {health.store && <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>}
-                {health.usageToday && health.caps && (
-                  <span className="chip">Today: public {health.usageToday.runs}/{health.caps.runsGlobalPerDay} runs · owner {health.usageToday.ownerRuns ?? 0}/{health.caps.ownerRunsPerDay ?? 20} runs · {health.usageToday.geminiCalls}/{health.caps.geminiDailyCallCap} AI calls · {health.usageToday.sends}/{health.caps.sendsGlobalPerDay} sends · Hunter {health.usageToday.hunterThisMonth}/{health.caps.hunterMonthlyCap} this month</span>
-                )}
-                {health.gmailCanConnect && <span className="chip warn"><a href="/api/gmail/start">Connect Gmail</a></span>}
-              </>
+            <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
+            {health.hunterAccount && (
+              <span className="chip">Hunter {health.hunterAccount.plan ?? "plan ?"}: {health.hunterAccount.available !== null && health.hunterAccount.used !== null ? `${health.hunterAccount.available - health.hunterAccount.used} of ${health.hunterAccount.available} left` : "usage unknown"}</span>
+            )}
+            {health.store && <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>}
+            {health.usageToday && health.caps && (
+              <span className="chip">Today: {health.usageToday.runs}/{health.caps.runsGlobalPerDay} runs · {health.usageToday.companies}/{health.caps.companiesGlobalPerDay} companies · {health.usageToday.geminiCalls}/{health.caps.geminiDailyCallCap} AI calls · {health.usageToday.sends}/{health.caps.sendsGlobalPerDay} preview emails · Hunter {health.usageToday.hunterThisMonth}/{health.caps.hunterMonthlyCap} lookups this month</span>
             )}
           </>
         ) : (
@@ -548,7 +534,7 @@ export default function Home() {
       ))}
 
       <p className="foot">
-        {health && !health.owner && <><a href="/owner">Owner sign-in</a> · </>}Sprinto never invents company facts or contacts: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
+        Sprinto never invents company facts or contacts: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
         Qualification rules are deterministic code; the model only extracts and drafts. Built for Mesa Term 2 AI Case 2.
       </p>
     </main>

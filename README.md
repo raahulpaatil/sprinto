@@ -2,15 +2,15 @@
 
 Cold-outreach research assistant for Sprinto's Growth Lead (Mesa Term 2, AI Case 2). Sprinto sells SOC 2 / ISO 27001 / GDPR readiness to B2B SaaS companies. This app automates the company research behind the first email.
 
-**Safety first:** the only email destination the app can ever use is `rahulmp458@gmail.com` (the owner's own inbox). Nothing is ever sent to a prospect. Facts are never invented: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
+**Safety first:** the only email destination the app can ever use is `rahulmp458@gmail.com` (the project owner's inbox). Nothing is ever sent to a prospect. Facts are never invented: every fact needs a verbatim quote from a fetched page, and anything uncertain is shown as uncertain.
 
 **Live app:** <https://sprinto-seven.vercel.app> (public, no login)
 
 ## Status
 
-Public, no login: anyone with the link can paste domains or use ICP discovery, watch the run, read the result for **their own run** (via that run's unguessable URL), and trigger the preview email. Previews can only ever go to the owner's inbox.
+One app for everyone, no sign-in and no roles: anyone with the link can paste domains or use ICP discovery, watch the run, read the result for their own run (via that run's unguessable URL), add a contact, and trigger the preview email. Previews can only ever go to the owner's inbox. One shared set of limits applies to everyone (see below), and the page shows what is left.
 
-Owner-only: connecting or relinking Gmail (`/api/gmail/start`, `/api/gmail/callback`) and every configuration/quota readout.
+Disabled (404): connecting or relinking Gmail from the web. The existing connection is used server-side only and its token is never exposed.
 
 ## Pipeline (per company domain)
 
@@ -66,27 +66,15 @@ Without `DATABASE_URL` it stores data in `./data/sprinto.db` (SQLite). With a Po
 | `GMAIL_CLIENT_SECRET` | for Gmail | Google OAuth web client secret (also the key that encrypts the stored refresh token) |
 | `GMAIL_REFRESH_TOKEN` | optional | If set, it is used and the connect flow is skipped |
 | `GMAIL_SENDER` | optional | From address, default `rahulmp458@gmail.com`. The recipient allowlist is fixed in code |
-| `GMAIL_REDIRECT_URI` | optional | Overrides the derived redirect URI (default `<site origin>/api/gmail/callback`) |
-| `OWNER_KEY` | yes | Owner sign-in key (at least 16 characters) |
 | Cap overrides | optional | see the cap table below |
 
-## Owner access
+## Gmail
 
-Only Gmail connect/callback and the configuration/quota details are owner-only. Sign in at `/owner` with the value of `OWNER_KEY` (at least 16 characters; set it in Vercel, then redeploy). Vercel does not return sensitive values, so `vercel env pull` cannot refresh it locally: **for local owner runs, set a fresh `OWNER_KEY` in your local `.env` by hand** (the copy there may be stale after a rotation on Vercel).
-
-## Gmail connect (in the app)
-
-1. In Google Cloud Console create an **OAuth client of type Web application**, enable the Gmail API, and add `rahulmp458@gmail.com` as a test user on the consent screen.
-2. Register this **Authorized redirect URI** exactly: `https://sprinto-seven.vercel.app/api/gmail/callback` (add `http://localhost:3000/api/gmail/callback` too for local use).
-3. Set `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` in Vercel and redeploy.
-4. Open `/api/gmail/start` (or the "Connect Gmail" link in the status bar) while signed in to `rahulmp458@gmail.com` and approve. Scope requested: `gmail.send` only, with offline access.
-5. The callback stores the refresh token encrypted in the database and shows "Gmail connected". The token is never displayed.
-
-With only `gmail.send`, Sprinto cannot read Sent mail. The duplicate-send lock is still atomic in the database, and after a timeout it refuses to resend rather than guess. Apps in Google's Testing mode expire refresh tokens after 7 days; reconnect via `/api/gmail/start`.
+There is no in-app Gmail connect or relink (`/api/gmail/start` and `/api/gmail/callback` return 404), because linking an account from a public page is not safe without sign-in. Sending uses a refresh token that already sits server-side, either in `GMAIL_REFRESH_TOKEN` or encrypted in the `sprinto.secrets` table (AES-256-GCM, keyed from `GMAIL_CLIENT_SECRET`). It is never returned by any endpoint. To change the connection, set `GMAIL_REFRESH_TOKEN` in Vercel (for example from `npm run gmail:auth`, a local helper that does the Google consent on your machine) and redeploy. Scope: `gmail.send` only, so after a timeout the app refuses to resend instead of checking Sent mail. Apps in Google's Testing mode expire refresh tokens after 7 days.
 
 ## Access protection and cost caps (public, no login)
 
-**Isolation.** A run is readable only through its own run id (a random UUID returned to the visitor who started it). There is no listing endpoint. Runs created by the owner, and any run without the `public` flag (including everything created before this model), are private and answer 404 to visitors.
+**Isolation.** A run is readable only through its own run id (a random UUID returned to the visitor who started it). There is no listing endpoint and no sign-in. Runs created before the single-role change (owner runs, early test runs), and any run without the `public` flag (including everything created before this model), are private and answer 404 to visitors.
 
 **Hard caps** (all enforced in code, counters in Postgres so they survive restarts and redeploys; defaults sized for free tiers, change only deliberately):
 
@@ -110,7 +98,7 @@ Over a limit the app shows "Daily demo limit reached, try again tomorrow" (or th
 3. Hunter's own account endpoint is read fresh before each lookup and the lookup is refused if it would leave fewer than 10 credits (`HUNTER_RESERVE`); if the remaining count cannot be read, the lookup is refused;
 4. a persistent monthly counter in Postgres, capped at 40 (`HUNTER_MONTHLY_CAP`).
 
-Credits are Hunter's own accounting; the numbers shown to the owner come from Hunter's account endpoint.
+Credits are Hunter's own accounting; the numbers shown on the page come from Hunter's account endpoint.
 
 **Manual review.** A manual-review card lists exactly what is missing (certifications, funding stage, SaaS status). The reviewer can add a contact and get a draft clearly labelled "MANUAL-REVIEW DRAFT". That never changes the decision, and a skipped company cannot be drafted at all. All send guards (owner-inbox allowlist, one send per company, daily cap) still apply.
 
