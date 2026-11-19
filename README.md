@@ -71,6 +71,10 @@ Without `DATABASE_URL` it stores data in `./data/sprinto.db` (SQLite). With a Po
 | `GMAIL_REDIRECT_URI` | optional | Overrides the derived redirect URI (default `<site origin>/api/gmail/callback`) |
 | `RUNS_PER_IP_PER_HOUR`, `RUNS_GLOBAL_PER_DAY`, `DISCOVER_PER_IP_PER_HOUR`, `DISCOVER_GLOBAL_PER_DAY` | optional | Override the limits below |
 
+## Owner access
+
+Live features are owner-only. Sign in at `/owner` with the value of `OWNER_KEY` (at least 16 characters; set it in Vercel, then redeploy). Vercel does not return sensitive values, so `vercel env pull` cannot refresh it locally: **for local owner runs, set a fresh `OWNER_KEY` in your local `.env` by hand** (the copy there may be stale after a rotation on Vercel). Visitors see the landing page and a static sample only.
+
 ## Gmail connect (in the app)
 
 1. In Google Cloud Console create an **OAuth client of type Web application**, enable the Gmail API, and add `rahulmp458@gmail.com` as a test user on the consent screen.

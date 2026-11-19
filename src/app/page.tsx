@@ -232,9 +232,12 @@ function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact
             <span>{c.send.note}</span>
           </div>
           <div className="hint">{c.send.to ? `To: ${c.send.to} · ` : ""}{c.send.messageId ? `Gmail id ${c.send.messageId} · ` : ""}{new Date(c.send.at).toLocaleString()}</div>
-          {c.draft?.status === "ready" && ["failed", "not_configured", "not_attempted", "unknown", "in_flight"].includes(c.send.status) && (
+          {c.draft?.status === "ready" && c.owner && (
             <div className="sendrow">
-              <button className="secondary" disabled={busy} onClick={() => onResend(c.id)}>Send preview to my inbox{c.send.status === "unknown" ? " (checks Gmail first)" : ""}</button>
+              <button className="secondary" disabled={busy} onClick={() => onResend(c.id)}>
+                {c.send.status === "sent" || c.send.status === "duplicate_prevented" ? "Try sending again (the lock should refuse)" : `Send preview to my inbox${c.send.status === "unknown" ? " (checks Gmail first)" : ""}`}
+              </button>
+              <span className="hint">Run {c.runId.slice(0, 8)} · company {c.id.slice(0, 8)}</span>
             </div>
           )}
         </details>
@@ -274,8 +277,8 @@ export default function Home() {
         setHealth(h);
         if (!h.owner) return;
         try {
-          const last = localStorage.getItem(LS_RUN);
-          if (last) api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`).then((r) => setCompanies(r.companies)).catch(() => undefined);
+          const last = new URLSearchParams(window.location.search).get("run") ?? localStorage.getItem(LS_RUN);
+          if (last && /^[0-9a-f-]{36}$/.test(last)) api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`).then((r) => setCompanies(r.companies)).catch(() => undefined);
         } catch {
           /* storage may be blocked */
         }
@@ -484,6 +487,9 @@ export default function Home() {
             <> · <button className="secondary" disabled={running} onClick={async () => { setRunning(true); for (const c of companies.filter((x) => x.status === "error")) await processOne(c); setRunning(false); }}>Retry errors</button></>
           )}
         </p>
+      )}
+      {companies.length > 0 && (
+        <p className="hint">Run id: <code>{companies[0].runId}</code> · <a href={`/?run=${companies[0].runId}`}>permalink (owner only)</a></p>
       )}
       {companies.map((c) => (
         <Company key={c.id} c={c} onContact={onContact} onResend={onResend} busy={busyIds.has(c.id)} />
