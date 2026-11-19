@@ -12,6 +12,7 @@ import type { CompanyRecord } from "../src/lib/types";
 import { allowAttempt, allowDiscover, allowRun, limits } from "../src/lib/limits";
 import { discoverDomains } from "../src/lib/discover";
 import { open as unseal, seal } from "../src/lib/secrets";
+import { parseFacts } from "../src/lib/extract";
 import { canAccessRun, checkOwnerKey, isOwner, issueOwnerCookie, OWNER_COOKIE, ownerOnly, signValue, verifySigned } from "../src/lib/access";
 import { gmailStatus, resolveRefreshToken, storeRefreshToken } from "../src/lib/gmail";
 
@@ -638,6 +639,22 @@ async function main() {
     check("CTO and VP Engineering are picked", rankContacts([e("CTO")]).contact?.role === "CTO" && !!rankContacts([e("VP of Engineering")]).contact);
     check("Co-founder and CEO are picked", !!rankContacts([e("Co-Founder & CEO")]).contact);
     check("a person without a full name or role is never picked", !rankContacts([{ value: "a@x.test", first_name: "Ann", last_name: null, position: "CTO" }, { value: "b@x.test", first_name: "Bo", last_name: "Li", position: null }]).contact);
+  }
+
+  // 20. certification wording
+  current = "20 certification wording (held vs mentioned)";
+  {
+    const held = (quote: string) => {
+      const pages = [{ url: "https://x.test/", kind: "security", text: `${quote} and some more filler text about the company to make this page long enough.` }];
+      const raw = { ...baseExtract(), certifications: [{ name: "SOC 2", status: "held", quote, url: "https://x.test/" }] };
+      return parseFacts(raw, pages).facts.certifications[0]?.status;
+    };
+    check("'SOC 2 Type II certification' counts as held", held("We have SOC 2 Type II certification") === "held");
+    check("'GDPR compliant and SOC 2 Type II' counts as held", held("Dock is GDPR compliant and SOC 2 Type II.") === "held");
+    check("'SOC 2 Type 2 attestation' counts as held", held("Yes, Warp has obtained a SOC 2 Type 2 attestation") === "held");
+    check("a bare 'SOC 2 and enterprise security' is only a mention (no disqualification)", held("SOC 2 and enterprise security features") === "mentioned", String(held("SOC 2 and enterprise security features")), true);
+    check("'we help you get SOC 2' is only a mention", held("We help you get SOC 2 ready fast") === "mentioned", "", true);
+    check("'working toward SOC 2' is not held", held("We are working toward SOC 2 this year") !== "held", "", true);
   }
 
   // utilities

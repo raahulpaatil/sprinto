@@ -308,7 +308,14 @@ export default function Home() {
         setHealth(h);
         try {
           const last = new URLSearchParams(window.location.search).get("run") ?? localStorage.getItem(LS_RUN);
-          if (last && /^[0-9a-f-]{36}$/.test(last)) api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`).then((r) => setCompanies(r.companies)).catch(() => undefined);
+          if (last && /^[0-9a-f-]{36}$/.test(last)) {
+            api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`)
+              .then((r) => {
+                setCompanies(r.companies);
+                for (const c of r.companies) if (c.status === "queued" || c.status === "running") void processOne(c);
+              })
+              .catch(() => undefined);
+          }
         } catch {
           /* storage may be blocked */
         }
@@ -316,14 +323,40 @@ export default function Home() {
       .catch(() => setHealth(null));
   }, []);
 
+  /** Starts the company on the server (returns at once) and polls the run until it is done. Transient errors never mark it failed. */
   async function processOne(c: CompanyRecord) {
     patch({ ...c, status: "running", stage: "starting" });
-    try {
-      const r = await api<{ company: CompanyRecord }>(`/api/companies/${c.id}/process`, {});
-      patch(r.company);
-    } catch (e) {
-      patch({ ...c, status: "error", error: e instanceof Error ? e.message : "Failed" });
+    let kicked = false;
+    for (let attempt = 0; attempt < 3 && !kicked; attempt++) {
+      try {
+        const r = await api<{ company: CompanyRecord }>(`/api/companies/${c.id}/process`, {});
+        patch(r.company);
+        if (r.company.status === "done" || r.company.status === "error") return;
+        kicked = true;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Failed";
+        if (/Too many attempts|not found|limit/i.test(msg)) {
+          patch({ ...c, status: "error", error: msg });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1500)); // network blip or gateway hiccup: just try again
+      }
     }
+    const deadline = Date.now() + 6 * 60_000;
+    while (Date.now() < deadline && !stop.current) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const r = await api<{ companies: CompanyRecord[] }>(`/api/runs/${c.runId}`);
+        const cur = r.companies.find((x) => x.id === c.id);
+        if (cur) {
+          patch(cur);
+          if (cur.status === "done" || cur.status === "error") return;
+        }
+      } catch {
+        /* transient: keep polling */
+      }
+    }
+    if (!stop.current) patch({ ...c, status: "error", error: "This is taking longer than expected. Reload the page to check the result, or press Retry." });
   }
 
   async function start() {
@@ -495,7 +528,7 @@ export default function Home() {
         </p>
       )}
       {companies.length > 0 && (
-        <p className="hint">Run id: <code>{companies[0].runId}</code> · <a href={`/?run=${companies[0].runId}`}>permalink (owner only)</a></p>
+        <p className="hint">Run id: <code>{companies[0].runId}</code> · <a href={`/?run=${companies[0].runId}`}>your private run link</a> <span>(anyone with this link can view this run, so keep it to yourself)</span></p>
       )}
       {companies.map((c) => (
         <Company key={c.id} c={c} onContact={onContact} onResend={onResend} busy={busyIds.has(c.id)} />

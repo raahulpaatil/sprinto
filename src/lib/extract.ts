@@ -105,6 +105,8 @@ const CERT_QUOTE_RE: Record<string, RegExp> = {
   "ISO 27001": /27001/i,
   GDPR: /gdpr/i,
 };
+// A bare mention ("SOC 2 and enterprise security") is not proof of a held certification; it needs affirmative wording.
+const AFFIRM_RE = /(certif|complian|attest|audit|report|type\s*(ii|2)|completed|achieved|passed|obtained|accredit|holds?\b|we are|we're|is soc|has soc)/i;
 const NOT_YET_RE = /(in progress|working (to|toward|towards)|preparing|pursuing|plan to|planning|soon|coming|roadmap|help(s|ing)?\s+(you|your|teams|companies|customers|startups|businesses)|get(ting)?\s+(you\s+)?(soc|iso|gdpr)|achieve|automate|readiness|ready for)/i;
 
 export function parseFacts(raw: unknown, pages: PageInput[]): { facts: CompanyFacts; dropped: string[] } {
@@ -128,7 +130,7 @@ export function parseFacts(raw: unknown, pages: PageInput[]): { facts: CompanyFa
       continue;
     }
     let st: Certification["status"] = status;
-    if (st === "held" && NOT_YET_RE.test(quote)) st = "mentioned";
+    if (st === "held" && (NOT_YET_RE.test(quote) || !AFFIRM_RE.test(quote))) st = "mentioned";
     certs.push({ name, status: st, evidence: { url: where, quote } });
   }
   const signals: Signal[] = [];
