@@ -2,6 +2,7 @@
 // HARD SAFETY RULE: the only allowed recipient is the owner's own inbox. Enforced here, server-side, twice
 // (before the duplicate-lock claim and again inside the mailer right before the HTTP call).
 
+import { open, seal } from "./secrets";
 import type { Store } from "./store";
 import type { SendResult } from "./types";
 
@@ -41,14 +42,37 @@ export class AmbiguousSendError extends Error {
 }
 
 export interface Mailer {
-  configured: boolean;
+  /** True when a client id, client secret and a refresh token (env first, then the stored one) are all available. */
+  configured(): Promise<boolean>;
   send(msg: OutboundMessage): Promise<{ messageId: string }>;
   /** found: message with this token exists in Sent. "unverifiable": cannot check (missing scope / not configured). */
   findByToken(token: string): Promise<{ found: true; messageId: string } | { found: false } | "unverifiable">;
 }
 
-export function gmailConfigured() {
-  return !!(process.env.GMAIL_CLIENT_ID?.trim() && process.env.GMAIL_CLIENT_SECRET?.trim() && process.env.GMAIL_REFRESH_TOKEN?.trim());
+export const GMAIL_TOKEN_SECRET = "gmail_refresh_token";
+
+export function gmailClientConfigured() {
+  return !!(process.env.GMAIL_CLIENT_ID?.trim() && process.env.GMAIL_CLIENT_SECRET?.trim());
+}
+
+/** Refresh token precedence: GMAIL_REFRESH_TOKEN from the environment wins; otherwise the one stored by /api/gmail/callback. */
+export async function resolveRefreshToken(store: Store): Promise<{ token: string; source: "env" | "stored" } | null> {
+  const env = process.env.GMAIL_REFRESH_TOKEN?.trim();
+  if (env) return { token: env, source: "env" };
+  const secret = process.env.GMAIL_CLIENT_SECRET?.trim();
+  if (!secret) return null;
+  const sealed = await store.getSecret(GMAIL_TOKEN_SECRET).catch(() => null);
+  const plain = sealed ? open(sealed, secret) : null;
+  return plain ? { token: plain, source: "stored" } : null;
+}
+
+export async function storeRefreshToken(store: Store, token: string) {
+  await store.setSecret(GMAIL_TOKEN_SECRET, seal(token, process.env.GMAIL_CLIENT_SECRET!.trim()));
+}
+
+export async function gmailStatus(store: Store): Promise<{ configured: boolean; source: "env" | "stored" | "none"; canConnect: boolean }> {
+  const t = gmailClientConfigured() ? await resolveRefreshToken(store) : null;
+  return { configured: !!t, source: t?.source ?? "none", canConnect: gmailClientConfigured() && !t };
 }
 
 function b64url(buf: Buffer) {
@@ -73,7 +97,9 @@ export function buildRaw(msg: OutboundMessage): string {
   return b64url(Buffer.from(lines.join("\r\n"), "utf8"));
 }
 
-async function accessToken(): Promise<string> {
+async function accessToken(store: Store): Promise<string> {
+  const rt = await resolveRefreshToken(store);
+  if (!rt || !gmailClientConfigured()) throw new Error("Gmail is not connected.");
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -81,7 +107,7 @@ async function accessToken(): Promise<string> {
     body: new URLSearchParams({
       client_id: process.env.GMAIL_CLIENT_ID!.trim(),
       client_secret: process.env.GMAIL_CLIENT_SECRET!.trim(),
-      refresh_token: process.env.GMAIL_REFRESH_TOKEN!.trim(),
+      refresh_token: rt.token,
       grant_type: "refresh_token",
     }),
   });
@@ -91,13 +117,14 @@ async function accessToken(): Promise<string> {
   return j.access_token;
 }
 
-export const gmailMailer: Mailer = {
-  get configured() {
-    return gmailConfigured();
+export function makeGmailMailer(store: Store): Mailer {
+  return {
+  async configured() {
+    return (await gmailStatus(store)).configured;
   },
   async send(msg) {
     const raw = buildRaw(msg); // re-checks the allowlist right before the network call
-    const token = await accessToken(); // failing here is definitive: nothing was sent
+    const token = await accessToken(store); // failing here is definitive: nothing was sent
     try {
       const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
         method: "POST",
@@ -120,9 +147,9 @@ export const gmailMailer: Mailer = {
     }
   },
   async findByToken(tokenStr) {
-    if (!gmailConfigured()) return "unverifiable";
+    if (!(await gmailStatus(store)).configured) return "unverifiable";
     try {
-      const token = await accessToken();
+      const token = await accessToken(store);
       const q = encodeURIComponent(`in:sent subject:"${tokenStr.replace(/[^A-Za-z0-9-]/g, "")}"`);
       const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=1`, {
         headers: { authorization: `Bearer ${token}` },
@@ -136,7 +163,8 @@ export const gmailMailer: Mailer = {
       return "unverifiable";
     }
   },
-};
+  };
+}
 
 export function tokenFor(companyId: string): string {
   let h = 0;
@@ -162,8 +190,8 @@ export async function sendPreview(opts: {
   const now = opts.now ?? (() => new Date());
   const at = () => now().toISOString();
   const to = assertAllowedRecipient(opts.to); // throws SafetyError before anything else happens
-  if (!opts.mailer.configured) {
-    return { status: "not_configured", to, note: "Gmail is not configured yet (client id / secret / refresh token missing). Nothing was sent.", at: at() };
+  if (!(await opts.mailer.configured())) {
+    return { status: "not_configured", to, note: "Gmail is not connected yet (client id, client secret or refresh token missing). Nothing was sent.", at: at() };
   }
   const key = `send:${opts.companyId}`;
   const token = tokenFor(opts.companyId);

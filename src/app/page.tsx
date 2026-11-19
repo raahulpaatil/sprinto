@@ -7,6 +7,7 @@ type Health = {
   gemini: boolean;
   hunter: boolean;
   gmail: boolean;
+  gmailCanConnect?: boolean;
   store: { kind: string; durable: boolean; ok: boolean };
   sendsOnlyTo: string;
 };
@@ -371,7 +372,7 @@ export default function Home() {
           <>
             <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
             <span className={`chip ${health.hunter ? "ok" : "warn"}`}>Hunter {health.hunter ? "ready" : "no key: contacts can be added manually"}</span>
-            <span className={`chip ${health.gmail ? "ok" : "warn"}`}>Gmail {health.gmail ? `ready, sends only to ${health.sendsOnlyTo}` : "not connected: drafts shown, nothing sent"}</span>
+            <span className={`chip ${health.gmail ? "ok" : "warn"}`}>Gmail {health.gmail ? `ready, sends only to ${health.sendsOnlyTo}` : "not connected: drafts shown, nothing sent"}{health.gmailCanConnect ? <> · <a href="/api/gmail/start">Connect Gmail</a></> : null}</span>
             <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>
           </>
         ) : (

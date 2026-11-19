@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { geminiConfigured } from "@/lib/gemini";
-import { gmailConfigured, OWNER_EMAIL } from "@/lib/gmail";
+import { gmailStatus, OWNER_EMAIL } from "@/lib/gmail";
 import { hunterConfigured } from "@/lib/hunter";
 import { getStore } from "@/lib/store";
 
@@ -15,10 +15,13 @@ export async function GET() {
   } catch {
     storeOk = false;
   }
+  const g = await gmailStatus(store).catch(() => ({ configured: false, source: "none" as const, canConnect: false }));
   return NextResponse.json({
     gemini: geminiConfigured(),
     hunter: hunterConfigured(),
-    gmail: gmailConfigured(),
+    gmail: g.configured,
+    gmailSource: g.source,
+    gmailCanConnect: g.canConnect,
     store: { kind: store.kind, durable: store.durable, ok: storeOk },
     sendsOnlyTo: OWNER_EMAIL.replace(/^(.).*(@.*)$/, "$1***$2"),
   });

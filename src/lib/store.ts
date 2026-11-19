@@ -29,6 +29,8 @@ export interface Store {
   getSend(key: string): Promise<SendLockRow | null>;
   /** Increment a counter and return the new value (used for rate limits). */
   hit(key: string, by: number): Promise<number>;
+  getSecret(name: string): Promise<string | null>;
+  setSecret(name: string, value: string): Promise<void>;
 }
 
 // ---------- in-memory store (tests / eval) ----------
@@ -63,6 +65,9 @@ export class MemoryStore implements Store {
   }
   async getSend(key: string) { const r = this.sends.get(key); return r ? { ...r } : null; }
   async hit(key: string, by: number) { const n = (this.counters.get(key) ?? 0) + by; this.counters.set(key, n); return n; }
+  secrets = new Map<string, string>();
+  async getSecret(name: string) { return this.secrets.get(name) ?? null; }
+  async setSecret(name: string, value: string) { this.secrets.set(name, value); }
 }
 
 // ---------- SQL store (SQLite or Postgres) ----------
@@ -77,6 +82,7 @@ const schemaFor = (P: string) => [
   `CREATE INDEX IF NOT EXISTS companies_run_idx ON ${P}companies (run_id)`,
   `CREATE TABLE IF NOT EXISTS ${P}sends (key TEXT PRIMARY KEY, company_id TEXT NOT NULL, state TEXT NOT NULL, message_id TEXT, updated_at TEXT NOT NULL, detail TEXT)`,
   `CREATE TABLE IF NOT EXISTS ${P}counters (k TEXT PRIMARY KEY, n INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS ${P}secrets (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 ];
 
 class SqlStore implements Store {
@@ -151,6 +157,16 @@ class SqlStore implements Store {
       updatedAt: String(x.updated_at),
       detail: (x.detail as string | null) ?? null,
     };
+  }
+  async getSecret(name: string) {
+    const r = await this.q(`SELECT v FROM ${this.P}secrets WHERE k = ?`, [name]);
+    return r[0] ? String(r[0].v) : null;
+  }
+  async setSecret(name: string, value: string) {
+    await this.q(
+      `INSERT INTO ${this.P}secrets (k, v, updated_at) VALUES (?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at`,
+      [name, value, new Date().toISOString()],
+    );
   }
   async hit(key: string, by: number) {
     const r = await this.q(

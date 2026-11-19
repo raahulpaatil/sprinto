@@ -11,6 +11,8 @@ import type { LLM, LlmRequest } from "../src/lib/gemini";
 import type { CompanyRecord } from "../src/lib/types";
 import { allowAttempt, allowDiscover, allowRun, limits } from "../src/lib/limits";
 import { discoverDomains } from "../src/lib/discover";
+import { open as unseal, seal } from "../src/lib/secrets";
+import { gmailStatus, resolveRefreshToken, storeRefreshToken } from "../src/lib/gmail";
 
 // ---------- tiny test framework ----------
 interface Result { scenario: string; check: string; ok: boolean; critical: boolean; detail?: string }
@@ -45,7 +47,7 @@ function mailerFake(opts: { failAfterDeliver?: boolean; findResult?: "unverifiab
   const deliveries: { to: string; subject: string; token: string }[] = [];
   let sendCalls = 0;
   const m: Mailer & { deliveries: typeof deliveries; sendCalls: () => number } = {
-    configured: true,
+    configured: async () => true,
     deliveries,
     sendCalls: () => sendCalls,
     async send(msg) {
@@ -448,6 +450,33 @@ async function main() {
     const found = await discoverDomains(undefined, async () => ({ candidates: many }));
     check("discovery results capped at 5", found.length === limits.maxDiscoveryResults && found.length === 5, String(found.length));
     check("domain cap per run is 10", limits.maxDomainsPerRun === 10);
+  }
+
+  // 15. gmail token handling
+  current = "15 gmail token storage and precedence";
+  {
+    const sealed = seal("dummy-refresh-token", "dummy-client-secret");
+    check("sealed token is not plaintext", !sealed.includes("dummy-refresh-token"));
+    check("seal/open round trip", unseal(sealed, "dummy-client-secret") === "dummy-refresh-token");
+    check("wrong key cannot open it", unseal(sealed, "other-secret") === null);
+    const saved = { id: process.env.GMAIL_CLIENT_ID, sec: process.env.GMAIL_CLIENT_SECRET, rt: process.env.GMAIL_REFRESH_TOKEN };
+    process.env.GMAIL_CLIENT_ID = "dummy-id";
+    process.env.GMAIL_CLIENT_SECRET = "dummy-client-secret";
+    delete process.env.GMAIL_REFRESH_TOKEN;
+    const st = new MemoryStore();
+    const none = await gmailStatus(st);
+    check("client set, no token: not configured but can connect", !none.configured && none.canConnect);
+    await storeRefreshToken(st, "stored-token");
+    check("stored token is encrypted in the store", !(await st.getSecret("gmail_refresh_token"))?.includes("stored-token"));
+    const r1 = await resolveRefreshToken(st);
+    check("stored token resolves", r1?.token === "stored-token" && r1.source === "stored");
+    process.env.GMAIL_REFRESH_TOKEN = "env-token";
+    const r2 = await resolveRefreshToken(st);
+    check("env token takes precedence over stored", r2?.token === "env-token" && r2.source === "env");
+    check("with env token the connect flow is not offered", !(await gmailStatus(st)).canConnect);
+    for (const [k, v] of [["GMAIL_CLIENT_ID", saved.id], ["GMAIL_CLIENT_SECRET", saved.sec], ["GMAIL_REFRESH_TOKEN", saved.rt]] as const) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
   }
 
   // utilities

@@ -4,7 +4,7 @@ import { composeEmailText, writeDraft } from "./draft";
 import { emptyFacts, extractFacts, norm, type PageInput } from "./extract";
 import { cleanHtml, fetchHomepage, kindOfUrl, pickPage, realFetch, registrable, stripSlash, type Fetcher, type FetchResult, type PageKind } from "./fetcher";
 import { geminiLLM, type LLM } from "./gemini";
-import { gmailMailer, OWNER_EMAIL, SafetyError, sendPreview, type Mailer } from "./gmail";
+import { makeGmailMailer, OWNER_EMAIL, SafetyError, sendPreview, type Mailer } from "./gmail";
 import { hunterContacts, type ContactFinder } from "./hunter";
 import { pageKindsFor, qualify, THIN_TEXT_CHARS } from "./qualify";
 import { getStore, type Store } from "./store";
@@ -24,7 +24,8 @@ export interface Deps {
 }
 
 export function liveDeps(): Deps {
-  return { fetcher: realFetch, llm: geminiLLM, contacts: hunterContacts, mailer: gmailMailer, store: getStore(), now: () => new Date() };
+  const store = getStore();
+  return { fetcher: realFetch, llm: geminiLLM, contacts: hunterContacts, mailer: makeGmailMailer(store), store, now: () => new Date() };
 }
 
 export function newCompany(runId: string, id: string, domain: string, sendEnabled: boolean, now: Date, expectedName?: string, hintContact?: { name: string; role: string }): CompanyRecord {
