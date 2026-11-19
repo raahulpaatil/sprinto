@@ -10,9 +10,9 @@ Cold-outreach research assistant for Sprinto's Growth Lead (Mesa Term 2, AI Case
 
 Working end to end on the live app: scrape, extract, qualify (with the research loop), decision with reasons, the evidence table, and the draft and send guards. Waiting on three one-time steps by the owner:
 
-1. **Gmail connection:** needs a Google sign-in and consent (see Gmail setup). Until then drafts are shown and the send result reads "not configured".
+1. **Gmail connection:** set the client id and secret, then open `/api/gmail/start` and approve (see Gmail connect). Until then drafts are shown and the send result reads "not connected".
 2. **Hunter API key:** until `HUNTER_API_KEY` is set, a qualified company records "contact skipped". A real contact can be typed in on the company card, or given up front as `domain | name | contact name | contact role`.
-3. **Durable storage on Vercel:** accept the Neon marketplace terms, then run `vercel integration add neon --name sprinto-db` in this folder. Until then the hosted app keeps records in `/tmp` (not durable), the page still works because it carries each company's setup with every request, and sends are verified against Gmail before any retry.
+3. **Storage:** durable. Sprinto uses a dedicated `sprinto` schema in an existing Neon Postgres database.
 
 ## Pipeline (per company domain)
 
@@ -43,7 +43,7 @@ Stage evidence is always labelled a **proxy, not proof**: a named funding stage,
 - **Duplicate-send lock:** an atomic `INSERT ... ON CONFLICT DO NOTHING` claims `send:<company id>`. After a timeout the state is `unknown`. A retry first asks Gmail whether a message with the company's `SPR-xxxxxxxx` token is in Sent. Found means it is marked sent and not resent. Gmail unable to confirm means it refuses to resend. Confirmed not delivered means it retries.
 - **No fabrication:** thin pages skip the model entirely; dropped claims are listed in the UI.
 - **Secrets** live in `.env` (git-ignored) and Vercel environment variables, and are read only in server code. The browser only ever receives booleans from `/api/health`.
-- **Public-demo limits:** max 10 domains per run, 40 companies per visitor per day, 250 per day overall.
+- **Public-demo limits:** see Access protection below.
 
 ## Run locally
 
@@ -59,29 +59,40 @@ Without `DATABASE_URL` it stores data in `./data/sprinto.db` (SQLite). With a Po
 
 ## Environment variables
 
-| Variable | Purpose |
-|---|---|
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | extraction, drafting, discovery |
-| `HUNTER_API_KEY` | Hunter Domain Search (optional; without it contacts can be added by hand) |
-| `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` | Gmail API send from the owner's address to the same address |
-| `DATABASE_URL` | Postgres/Neon connection string for durable hosted storage |
+| Variable | Required | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | yes | extraction, drafting, discovery |
+| `DATABASE_URL` | yes on Vercel | Postgres connection string. Tables live in a dedicated `sprinto` schema. Empty locally = SQLite at `./data/sprinto.db` |
+| `HUNTER_API_KEY` | optional | Hunter Domain Search. Without it a contact can be typed in by hand |
+| `GMAIL_CLIENT_ID` | for Gmail | Google OAuth web client id |
+| `GMAIL_CLIENT_SECRET` | for Gmail | Google OAuth web client secret (also the key that encrypts the stored refresh token) |
+| `GMAIL_REFRESH_TOKEN` | optional | If set, it is used and the connect flow is skipped |
+| `GMAIL_SENDER` | optional | From address, default `rahulmp458@gmail.com`. The recipient allowlist is fixed in code |
+| `GMAIL_REDIRECT_URI` | optional | Overrides the derived redirect URI (default `<site origin>/api/gmail/callback`) |
+| `RUNS_PER_IP_PER_HOUR`, `RUNS_GLOBAL_PER_DAY`, `DISCOVER_PER_IP_PER_HOUR`, `DISCOVER_GLOBAL_PER_DAY` | optional | Override the limits below |
 
-## Gmail setup (one-time, needs your browser)
+## Gmail connect (in the app)
 
-1. Go to <https://console.cloud.google.com/> and create a project (for example `sprinto`).
-2. **APIs & Services → Library**: enable **Gmail API**.
-3. **APIs & Services → OAuth consent screen**: choose External, fill in the app name and your email, and under **Test users** add `rahulmp458@gmail.com`. Leave the app in Testing.
-4. **Credentials → Create credentials → OAuth client ID → Desktop app**. Copy the client ID and secret into `.env` as `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET`.
-5. Run `npm run gmail:auth`, open the URL it prints, and approve access for `rahulmp458@gmail.com`. It saves `GMAIL_REFRESH_TOKEN` to `.env` without printing it.
-6. Add the three Gmail variables to Vercel (Project Settings → Environment Variables) and redeploy.
+1. In Google Cloud Console create an **OAuth client of type Web application**, enable the Gmail API, and add `rahulmp458@gmail.com` as a test user on the consent screen.
+2. Register this **Authorized redirect URI** exactly: `https://sprinto-seven.vercel.app/api/gmail/callback` (add `http://localhost:3000/api/gmail/callback` too for local use).
+3. Set `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` in Vercel and redeploy.
+4. Open `/api/gmail/start` (or the "Connect Gmail" link in the status bar) while signed in to `rahulmp458@gmail.com` and approve. Scope requested: `gmail.send` only, with offline access.
+5. The callback stores the refresh token encrypted in the database and shows "Gmail connected". The token is never displayed.
 
-Scopes used: `gmail.send`, plus `gmail.readonly` only to verify "sent" before any retry. Google shows an "unverified app" warning for apps in Testing; click Advanced → continue. Refresh tokens for apps in Testing expire after 7 days, so re-run `npm run gmail:auth` if sends start failing.
+With only `gmail.send`, Sprinto cannot read Sent mail. The duplicate-send lock is still atomic in the database, and after a timeout it refuses to resend rather than guess. Apps in Google's Testing mode expire refresh tokens after 7 days; reconnect via `/api/gmail/start`.
+
+## Access protection (public, no login)
+
+- 5 research runs per hour per visitor, 20 runs per day overall (HTTP 429 with `Retry-After`).
+- 10 domains per run. Discovery: 5 requests per hour per visitor, 20 per day overall, 5 results each.
+- Per-company caps on re-processing (3), adding a contact (3) and resending (5).
+- Run lists are not exposed; a run is only readable by its unguessable id.
 
 ## Layout
 
 ```
 src/lib/        pipeline, qualify, extract, draft, hunter, gmail, fetcher, store, discover, limits
-src/app/api/    runs, companies/[id]/{process,contact,send}, discover, health
+src/app/api/    runs, companies/[id]/{process,contact,send}, discover, gmail/{start,callback}, health
 src/app/        the single-page UI
-scripts/        eval.ts (checker pass), smoke.ts (live), gmail-auth.mjs
+scripts/        eval.ts (checker pass), smoke.ts (live), gmail-auth.mjs (optional local alternative)
 ```
