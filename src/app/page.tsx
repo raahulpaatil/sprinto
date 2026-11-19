@@ -52,6 +52,11 @@ const DECISION_LABEL: Record<string, string> = {
   pending: "Pending",
 };
 
+/** Number that plays a short fade/rise once whenever its value changes. */
+function Num({ v }: { v: number | string }) {
+  return <span key={String(v)} className="num">{v}</span>;
+}
+
 function Conf({ c }: { c: string }) {
   return <span className={`conf ${c}`}>{c === "proxy" ? "proxy, not proof" : c}</span>;
 }
@@ -83,15 +88,17 @@ function shortUrl(u: string) {
   }
 }
 
-function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact: (id: string, name: string, role: string) => void; onResend: (id: string) => void; busy: boolean }) {
+function Company({ c, onContact, onResend, busy, index = 0 }: { c: CompanyRecord; onContact: (id: string, name: string, role: string) => void; onResend: (id: string) => void; busy: boolean; index?: number }) {
   const [cName, setCName] = useState("");
   const [cRole, setCRole] = useState("");
   const decisionKey = c.status === "error" ? "error" : c.status === "queued" || c.status === "running" ? c.status : c.decision.result;
   const label = c.status === "error" ? "Error" : c.status === "queued" ? "Queued" : c.status === "running" ? `Running: ${c.stage}` : DECISION_LABEL[c.decision.result];
   const f = c.facts;
   const finished = c.status === "done";
+  const inProgress = c.status === "running" || c.status === "queued";
+  const lastLog = c.log[c.log.length - 1];
   return (
-    <div className="card">
+    <div className="card" style={{ "--i": Math.min(index, 8) } as React.CSSProperties}>
       <div className="co-head">
         <div>
           <div className="co-title">{f?.company_name.value ?? c.expectedName ?? c.domain}</div>
@@ -99,6 +106,12 @@ function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact
         </div>
         <span className={`badge b-${decisionKey}`}>{label}</span>
       </div>
+      {inProgress && (
+        <div className="live" role="status" aria-live="polite">
+          <span className="pulse" aria-hidden="true" />
+          <span>{c.status === "queued" ? "Waiting to start" : `${c.stage}${lastLog ? `: ${lastLog.msg}` : ""}`}</span>
+        </div>
+      )}
 
       {c.error && <div className="err">{c.error}</div>}
 
@@ -273,9 +286,13 @@ function Company({ c, onContact, onResend, busy }: { c: CompanyRecord; onContact
       )}
 
       {c.log.length > 0 && (
-        <details>
+        <details open={inProgress ? true : undefined}>
           <summary>Activity log</summary>
-          <div className="log">{c.log.map((l) => `${l.t.slice(11, 19)} [${l.stage}] ${l.msg}`).join("\n")}</div>
+          <div className="log">
+            {c.log.map((l) => (
+              <div className="logline" key={`${l.t}|${l.stage}|${l.msg}`}>{`${l.t.slice(11, 19)} [${l.stage}] ${l.msg}`}</div>
+            ))}
+          </div>
         </details>
       )}
     </div>
@@ -291,6 +308,7 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [healthDone, setHealthDone] = useState(false);
   const [cands, setCands] = useState<Candidate[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [caveat, setCaveat] = useState("");
@@ -318,7 +336,8 @@ export default function Home() {
           /* storage may be blocked */
         }
       })
-      .catch(() => setHealth(null));
+      .catch(() => setHealth(null))
+      .finally(() => setHealthDone(true));
   }, []);
 
   /** Starts the company on the server (returns at once) and polls the run until it is done. Transient errors never mark it failed. */
@@ -447,7 +466,7 @@ export default function Home() {
             <span className={`chip ${health.sendReady ? "ok" : "warn"}`}>Preview email {health.sendReady ? "on: goes only to the owner’s inbox" : "not connected yet: drafts are shown, nothing is sent"}</span>
             {health.allowance && (
               <span className={`chip ${health.allowance.runsLeftToday > 0 && health.allowance.runsLeftThisHourForYou > 0 ? "" : "warn"}`}>
-                Demo limits: {health.allowance.runsLeftToday} of {health.allowance.runsDailyCap} runs left today (resets 00:00 UTC, 05:30 IST) · {health.allowance.runsLeftThisHourForYou} of {health.allowance.runsHourlyCap} left for you this hour
+                Demo limits: <Num v={health.allowance.runsLeftToday} /> of {health.allowance.runsDailyCap} runs left today (resets 00:00 UTC, 05:30 IST) · <Num v={health.allowance.runsLeftThisHourForYou} /> of {health.allowance.runsHourlyCap} left for you this hour
               </span>
             )}
             <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
@@ -456,16 +475,23 @@ export default function Home() {
             )}
             {health.store && <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>}
             {health.usageToday && health.caps && (
-              <span className="chip">Today: {health.usageToday.runs}/{health.caps.runsGlobalPerDay} runs · {health.usageToday.companies}/{health.caps.companiesGlobalPerDay} companies · {health.usageToday.geminiCalls}/{health.caps.geminiDailyCallCap} AI calls · {health.usageToday.sends}/{health.caps.sendsGlobalPerDay} preview emails · Hunter {health.usageToday.hunterThisMonth}/{health.caps.hunterMonthlyCap} lookups this month</span>
+              <span className="chip">Today: <Num v={health.usageToday.runs} />/{health.caps.runsGlobalPerDay} runs · <Num v={health.usageToday.companies} />/{health.caps.companiesGlobalPerDay} companies · <Num v={health.usageToday.geminiCalls} />/{health.caps.geminiDailyCallCap} AI calls · <Num v={health.usageToday.sends} />/{health.caps.sendsGlobalPerDay} preview emails · Hunter <Num v={health.usageToday.hunterThisMonth} />/{health.caps.hunterMonthlyCap} lookups this month</span>
             )}
           </>
+        ) : healthDone ? (
+          <span className="chip">Status unavailable</span>
         ) : (
-          <span className="chip">Checking status…</span>
+          <>
+            <span className="sr-only">Checking status…</span>
+            <span className="chip skel" aria-hidden="true" style={{ width: 150 }} />
+            <span className="chip skel" aria-hidden="true" style={{ width: 230 }} />
+            <span className="chip skel" aria-hidden="true" style={{ width: 120 }} />
+          </>
         )}
       </div>
 
       <div className="card">
-        <div className="tabs" role="tablist">
+        <div className="tabs" role="tablist" data-active={tab}>
           <button className="tab" role="tab" aria-selected={tab === "paste"} onClick={() => setTab("paste")}>Paste domains</button>
           <button className="tab" role="tab" aria-selected={tab === "discover"} onClick={() => setTab("discover")}>Discover from ICP</button>
         </div>
@@ -509,7 +535,7 @@ export default function Home() {
 
       {tab === "paste" && (
         <div className="runbar">
-          <button className="primary" disabled={running || text.trim().length < 3} onClick={start}>
+          <button className={running ? "primary busy" : "primary"} aria-busy={running} disabled={running || text.trim().length < 3} onClick={start}>
             {running ? "Researching…" : "Run research"}
           </button>
           {running && (
@@ -520,7 +546,7 @@ export default function Home() {
 
       {companies.length > 0 && (
         <p className="hint summaryline" aria-live="polite">
-          {companies.length} compan{companies.length === 1 ? "y" : "ies"}: {counts.fit ?? 0} fit · {counts.manual_review ?? 0} manual review · {counts.skip ?? 0} skipped · {(counts.running ?? 0) + (counts.queued ?? 0)} in progress{counts.error ? ` · ${counts.error} error` : ""}
+          {companies.length} compan{companies.length === 1 ? "y" : "ies"}: <Num v={counts.fit ?? 0} /> fit · <Num v={counts.manual_review ?? 0} /> manual review · <Num v={counts.skip ?? 0} /> skipped · <Num v={(counts.running ?? 0) + (counts.queued ?? 0)} /> in progress{counts.error ? ` · ${counts.error} error` : ""}
           {companies.some((c) => c.status === "error") && (
             <> · <button className="secondary" disabled={running} onClick={async () => { setRunning(true); for (const c of companies.filter((x) => x.status === "error")) await processOne(c); setRunning(false); }}>Retry errors</button></>
           )}
@@ -530,7 +556,7 @@ export default function Home() {
         <p className="hint">Run id: <code>{companies[0].runId}</code> · <a href={`/?run=${companies[0].runId}`}>your private run link</a> <span>(anyone with this link can view this run, so keep it to yourself)</span></p>
       )}
       {companies.map((c) => (
-        <Company key={c.id} c={c} onContact={onContact} onResend={onResend} busy={busyIds.has(c.id)} />
+        <Company key={c.id} c={c} index={companies.indexOf(c)} onContact={onContact} onResend={onResend} busy={busyIds.has(c.id)} />
       ))}
 
       <p className="foot">

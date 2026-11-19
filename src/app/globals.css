@@ -116,13 +116,20 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--well); pad
 .chip.warn { color: var(--review); background: var(--review-bg); border-color: transparent; }
 
 /* ---- input ---- */
-.tabs { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 14px; background: var(--well); border-radius: 14px; }
+.tabs { position: relative; display: inline-grid; grid-template-columns: 1fr 1fr; padding: 4px; margin-bottom: 14px; background: var(--well); border-radius: 14px; }
+.tabs::before {
+  content: ""; position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / 2);
+  background: var(--card); border-radius: 10px; box-shadow: 0 1px 3px rgba(41, 37, 36, 0.12);
+  transition: transform 0.22s ease;
+}
+.tabs[data-active="discover"]::before { transform: translateX(100%); }
 .tab {
+  position: relative; z-index: 1; white-space: nowrap;
   border: 0; background: transparent; color: var(--muted); padding: 8px 16px; border-radius: 10px;
   cursor: pointer; font: 500 14px var(--sans); transition: background 0.15s, color 0.15s;
 }
 .tab:hover { color: var(--ink); }
-.tab[aria-selected="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(41, 37, 36, 0.12); }
+.tab[aria-selected="true"] { color: var(--ink); }
 textarea, input[type="text"], input[type="password"] {
   width: 100%; font: 14px/1.55 var(--mono); padding: 12px 14px; border-radius: var(--radius-sm);
   border: 1px solid var(--line-strong); background: var(--bg); color: var(--ink);
@@ -224,4 +231,81 @@ pre.mail {
   .card { animation: none; }
   *, *::before, *::after { transition: none !important; }
   button.primary:hover:not(:disabled) { transform: none; }
+}
+
+/* =====================================================================
+   Motion layer. Transforms and opacity only; every animation is under 300ms
+   (stagger delays aside). Only the in-progress pulse and shimmer loop, and
+   they exist only while a run or the first status load is in progress.
+   ===================================================================== */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* staggered card entrance: each result card cascades in (index capped at 8) */
+.card { animation-delay: calc(var(--i, 0) * 38ms); }
+
+/* evidence table rows cascade (30ms apart, capped at 14 rows) */
+@keyframes row-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+tbody tr { animation: row-in 0.22s ease-out both; animation-delay: calc(var(--r, 0) * 30ms); }
+tbody tr:nth-child(1) { --r: 0; }
+tbody tr:nth-child(2) { --r: 1; }
+tbody tr:nth-child(3) { --r: 2; }
+tbody tr:nth-child(4) { --r: 3; }
+tbody tr:nth-child(5) { --r: 4; }
+tbody tr:nth-child(6) { --r: 5; }
+tbody tr:nth-child(7) { --r: 6; }
+tbody tr:nth-child(8) { --r: 7; }
+tbody tr:nth-child(9) { --r: 8; }
+tbody tr:nth-child(10) { --r: 9; }
+tbody tr:nth-child(11) { --r: 10; }
+tbody tr:nth-child(12) { --r: 11; }
+tbody tr:nth-child(13) { --r: 12; }
+tbody tr:nth-child(14) { --r: 13; }
+
+/* activity log lines slide/fade in as they are appended */
+@keyframes line-in { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
+.logline { animation: line-in 0.22s ease-out both; }
+
+/* live current-step indicator while a company is being processed */
+.live {
+  display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 8px 12px;
+  background: var(--run-bg); color: var(--run); border-radius: var(--radius-sm); font-size: 13.5px; font-weight: 500;
+}
+.pulse { position: relative; width: 8px; height: 8px; border-radius: 999px; background: var(--run); flex: none; }
+.pulse::after {
+  content: ""; position: absolute; inset: 0; border-radius: 999px; background: var(--run); opacity: 0;
+  animation: pulse-ring 1.4s ease-out infinite;
+}
+@keyframes pulse-ring { 0% { opacity: 0.55; transform: scale(1); } 100% { opacity: 0; transform: scale(2.8); } }
+
+/* busy Run button: a light sweep (transform only) while the run is in progress */
+button.primary.busy { position: relative; overflow: hidden; }
+button.primary.busy::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%); pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+  animation: sweep 1.3s ease-in-out infinite;
+}
+@keyframes sweep { to { transform: translateX(100%); } }
+
+/* counters: a short fade/rise whenever a number changes */
+@keyframes num-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.num { display: inline-block; animation: num-in 0.2s ease-out both; font-variant-numeric: tabular-nums; }
+.chip { transition: background-color 0.2s ease, color 0.2s ease; }
+
+/* skeleton chips until the status call returns (stops when it does, or if it fails) */
+.chip.skel { position: relative; overflow: hidden; height: 28px; border-color: transparent; background: var(--well); }
+.chip.skel::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: sweep 1.3s ease-in-out infinite;
+}
+
+/* micro-interactions: gentle lift on hover, compression on press */
+button.secondary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--shadow); }
+button.primary:active:not(:disabled), button.secondary:active:not(:disabled) { transform: translateY(0) scale(0.98); transition-duration: 0.06s; }
+.tab:active { transform: scale(0.98); }
+
+/* reduced motion: turn all of it off (no pulse, no stagger, no shimmer, no sliding) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .pulse::after { display: none; }
 }
