@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { isOwner } from "@/lib/access";
 import { normalizeDomain } from "@/lib/fetcher";
-import { allowCompaniesToday, allowOwnerRun, allowRun, clientIp, MAX_DOMAINS_PER_RUN } from "@/lib/limits";
+import { clientIp, gateRun, MAX_DOMAINS_PER_RUN } from "@/lib/limits";
 import { newCompany, liveDeps, stripPageText } from "@/lib/pipeline";
 import type { RunRecord } from "@/lib/types";
 
@@ -38,16 +38,12 @@ export async function POST(req: Request) {
   if (parsed.length > MAX_DOMAINS_PER_RUN) {
     return NextResponse.json({ error: `Please keep it to ${MAX_DOMAINS_PER_RUN} domains per run (you sent ${parsed.length}).` }, { status: 400 });
   }
-  const gate = owner ? await allowOwnerRun(deps.store) : await allowRun(deps.store, clientIp(req));
+  const gate = await gateRun(deps.store, { owner, ip: clientIp(req), companies: parsed.length });
   if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 429, headers: { "retry-after": String(gate.retryAfterSec ?? 3600) } });
-  if (!owner) {
-    const cg = await allowCompaniesToday(deps.store, parsed.length);
-    if (!cg.ok) return NextResponse.json({ error: cg.reason }, { status: 429, headers: { "retry-after": String(cg.retryAfterSec ?? 3600) } });
-  }
 
   const now = deps.now();
   const sendEnabled = body.send !== false;
-  const run: RunRecord = { id: randomUUID(), mode: body.mode === "discover" ? "discover" : "paste", sendEnabled, companyIds: [], createdAt: now.toISOString(), owner, public: !owner };
+  const run: RunRecord = { id: randomUUID(), mode: body.mode === "discover" ? "discover" : "paste", sendEnabled, companyIds: [], createdAt: now.toISOString(), owner, public: !owner, startedBy: owner ? "owner" : "visitor" };
   const companies = parsed.map((p, i) => {
     const c = newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name, p.contactName && p.contactRole ? { name: p.contactName, role: p.contactRole } : undefined);
     c.owner = owner;

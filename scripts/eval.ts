@@ -9,7 +9,7 @@ import { MemoryStore } from "../src/lib/store";
 import { cappedContacts, continueWithContact, newCompany, processCompany, RESEARCH_LOOP_CAP, trySend, type Deps } from "../src/lib/pipeline";
 import { budgetedLLM, DemoLimitError, type LLM, type LlmRequest } from "../src/lib/gemini";
 import type { CompanyRecord } from "../src/lib/types";
-import { allowAttempt, allowDiscover, allowRun, limits } from "../src/lib/limits";
+import { allowAttempt, allowDiscover, allowRun, gateRun, limits, publicAllowance } from "../src/lib/limits";
 import { discoverDomains } from "../src/lib/discover";
 import { open as unseal, seal } from "../src/lib/secrets";
 import { parseFacts } from "../src/lib/extract";
@@ -655,6 +655,34 @@ async function main() {
     check("a bare 'SOC 2 and enterprise security' is only a mention (no disqualification)", held("SOC 2 and enterprise security features") === "mentioned", String(held("SOC 2 and enterprise security features")), true);
     check("'we help you get SOC 2' is only a mention", held("We help you get SOC 2 ready fast") === "mentioned", "", true);
     check("'working toward SOC 2' is not held", held("We are working toward SOC 2 this year") !== "held", "", true);
+  }
+
+  // 21. owner vs public allowance
+  current = "21 owner runs are separate from the public allowance";
+  {
+    const st = new MemoryStore();
+    const t = new Date("2026-11-19T10:15:00Z");
+    const day = "2026-11-19", hour = "2026-11-19T10";
+    // public already used 7 of 10 today (like the live state) and this IP used 1 of 3 this hour
+    for (let i = 0; i < 7; i++) await st.hit(`runs:d:${day}:all`, 1);
+    await st.hit(`runs:h:${hour}:9.9.9.9`, 1);
+    await st.hit(`companies:d:${day}:all`, 9);
+    const before = await publicAllowance(st, "9.9.9.9", t);
+    const ownerRes: boolean[] = [];
+    for (let i = 0; i < 21; i++) ownerRes.push((await gateRun(st, { owner: true, ip: "9.9.9.9", companies: 5, now: t })).ok);
+    const after = await publicAllowance(st, "9.9.9.9", t);
+    check("owner gets exactly 20 runs a day, the 21st is refused", ownerRes.slice(0, 20).every(Boolean) && !ownerRes[20] && limits.ownerRunsPerDay === 20, JSON.stringify(ownerRes.filter((x) => !x).length), true);
+    check("owner runs do not change the public global run counter", after.runsLeftToday === before.runsLeftToday && before.runsLeftToday === 3, `${before.runsLeftToday} -> ${after.runsLeftToday}`, true);
+    check("owner runs do not change the per-IP hourly counter", after.runsLeftThisHourForYou === before.runsLeftThisHourForYou && before.runsLeftThisHourForYou === 2, `${before.runsLeftThisHourForYou} -> ${after.runsLeftThisHourForYou}`, true);
+    check("owner runs do not consume the public companies allowance", after.companiesLeftToday === before.companiesLeftToday && before.companiesLeftToday === 31, `${before.companiesLeftToday} -> ${after.companiesLeftToday}`, true);
+    const vis = [];
+    for (let i = 0; i < 4; i++) vis.push((await gateRun(st, { owner: false, ip: "5.5.5.5", companies: 1, now: t })).ok);
+    const after2 = await publicAllowance(st, "5.5.5.5", t);
+    check("visitors still hit the 3/hour per-IP limit", vis.slice(0, 3).every(Boolean) && !vis[3], JSON.stringify(vis));
+    check("visitor runs do consume the public global counter and nothing else of the owner's", after2.runsLeftToday === 0 && (await st.hit(`runs:owner:d:${day}`, 0)) === 21, `${after2.runsLeftToday}`);
+    const full = await gateRun(st, { owner: false, ip: "6.6.6.6", companies: 1, now: t });
+    check("public daily cap still refuses with the clean message", !full.ok && /Daily demo limit reached.*tomorrow/.test(full.reason ?? ""), full.reason ?? "");
+    check("allowance reports honest reset times", before.dailyResetsAtUtc === "2026-11-20T00:00:00.000Z" && before.hourlyResetsAtUtc === "2026-11-19T11:00:00.000Z", `${before.dailyResetsAtUtc} ${before.hourlyResetsAtUtc}`);
   }
 
   // utilities

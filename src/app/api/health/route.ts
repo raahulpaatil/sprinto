@@ -3,7 +3,7 @@ import { isOwner, ownerConfigured } from "@/lib/access";
 import { geminiConfigured } from "@/lib/gemini";
 import { gmailStatus, OWNER_EMAIL } from "@/lib/gmail";
 import { hunterAccount, hunterConfigured } from "@/lib/hunter";
-import { limits } from "@/lib/limits";
+import { clientIp, limits, publicAllowance } from "@/lib/limits";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ export async function GET(req: Request) {
   const store = getStore();
   const g = await gmailStatus(store).catch(() => ({ configured: false, source: "none" as const, canConnect: false }));
   if (!isOwner(req)) {
-    return NextResponse.json({ owner: false, ownerConfigured: ownerConfigured(), sendReady: g.configured, contactLookup: hunterConfigured() }, { headers: NS });
+    return NextResponse.json({ owner: false, ownerConfigured: ownerConfigured(), sendReady: g.configured, contactLookup: hunterConfigured(), allowance: await publicAllowance(store, clientIp(req)) }, { headers: NS });
   }
   let storeOk = true;
   try {
@@ -46,9 +46,11 @@ export async function GET(req: Request) {
         hunterPerRunCap: Number(process.env.HUNTER_PER_RUN_CAP || 5),
         hunterReserve: Number(process.env.HUNTER_RESERVE || 10),
         sendsGlobalPerDay: Number(process.env.SENDS_GLOBAL_PER_DAY || 25),
+        ownerRunsPerDay: Number(process.env.OWNER_RUNS_PER_DAY || 20),
       },
       usageToday: {
         runs: await store.hit(`runs:d:${day}:all`, 0),
+        ownerRuns: await store.hit(`runs:owner:d:${day}`, 0),
         companies: await store.hit(`companies:d:${day}:all`, 0),
         geminiCalls: await store.hit(`gemini:d:${day}`, 0),
         sends: await store.hit(`sends:d:${day}`, 0),

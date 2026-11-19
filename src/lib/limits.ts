@@ -12,6 +12,7 @@ export const limits = {
   get maxDomainsPerRun() { return 10; },
   get runsPerIpPerHour() { return num(process.env.RUNS_PER_IP_PER_HOUR, 3); },
   get runsGlobalPerDay() { return num(process.env.RUNS_GLOBAL_PER_DAY, 10); },
+  get ownerRunsPerDay() { return num(process.env.OWNER_RUNS_PER_DAY, 20); },
   get companiesGlobalPerDay() { return num(process.env.COMPANIES_GLOBAL_PER_DAY, 40); },
   get discoverPerIpPerHour() { return num(process.env.DISCOVER_PER_IP_PER_HOUR, 3); },
   get discoverGlobalPerDay() { return num(process.env.DISCOVER_GLOBAL_PER_DAY, 10); },
@@ -93,8 +94,41 @@ export async function allowCompaniesToday(store: Store, n: number, now = new Dat
     : { ok: true };
 }
 
-/** The signed-in owner skips the visitor allowance but keeps a ceiling so a bug cannot run away. */
+/**
+ * Owner runs have their own bounded daily counter (`runs:owner:d:<UTC day>`, default 20, env OWNER_RUNS_PER_DAY).
+ * They never touch the public counters (`runs:d:<day>:all`, `runs:h:<hour>:<ip>`, `companies:d:<day>:all`), so owner testing
+ * cannot eat the evaluators' allowance. The ceiling still limits damage if the owner key ever leaks.
+ */
 export async function allowOwnerRun(store: Store, now = new Date()): Promise<Gate> {
+  const cap = num(process.env.OWNER_RUNS_PER_DAY, 20);
   const n = await store.hit(`runs:owner:d:${dayKey(now)}`, 1);
-  return n > 30 ? { ok: false, retryAfterSec: secondsToNextDay(now), reason: "Owner daily ceiling (30 runs) reached." } : { ok: true };
+  return n > cap ? { ok: false, retryAfterSec: secondsToNextDay(now), reason: `Owner daily ceiling (${cap} runs) reached. It resets at 00:00 UTC.` } : { ok: true };
 }
+
+/** Single entry point for starting a run: owner runs and visitor runs are counted separately. */
+export async function gateRun(store: Store, opts: { owner: boolean; ip: string; companies: number; now?: Date }): Promise<Gate> {
+  const now = opts.now ?? new Date();
+  if (opts.owner) return allowOwnerRun(store, now);
+  const g = await allowRun(store, opts.ip, now);
+  if (!g.ok) return g;
+  return allowCompaniesToday(store, opts.companies, now);
+}
+
+/** What a visitor may still do today. Reads counters without incrementing them. */
+export async function publicAllowance(store: Store, ip: string, now = new Date()) {
+  const usedGlobal = await store.hit(`runs:d:${dayKey(now)}:all`, 0);
+  const usedIp = await store.hit(`runs:h:${hourKey(now)}:${ip}`, 0);
+  const usedCompanies = await store.hit(`companies:d:${dayKey(now)}:all`, 0);
+  const nextDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+  const nextHour = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours() + 1)).toISOString();
+  return {
+    runsLeftToday: Math.max(0, limits.runsGlobalPerDay - usedGlobal),
+    runsDailyCap: limits.runsGlobalPerDay,
+    runsLeftThisHourForYou: Math.max(0, limits.runsPerIpPerHour - usedIp),
+    runsHourlyCap: limits.runsPerIpPerHour,
+    companiesLeftToday: Math.max(0, limits.companiesGlobalPerDay - usedCompanies),
+    dailyResetsAtUtc: nextDay,
+    hourlyResetsAtUtc: nextHour,
+  };
+}
+

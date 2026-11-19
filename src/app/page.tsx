@@ -14,9 +14,10 @@ type Health = {
   gmail?: boolean;
   gmailCanConnect?: boolean;
   store?: { kind: string; durable: boolean; ok: boolean };
-  usageToday?: { runs: number; companies: number; geminiCalls: number; sends: number; hunterThisMonth: number };
-  caps?: { runsGlobalPerDay: number; companiesGlobalPerDay: number; geminiDailyCallCap: number; hunterMonthlyCap: number; sendsGlobalPerDay: number };
+  usageToday?: { runs: number; ownerRuns?: number; companies: number; geminiCalls: number; sends: number; hunterThisMonth: number };
+  caps?: { ownerRunsPerDay?: number; runsGlobalPerDay: number; companiesGlobalPerDay: number; geminiDailyCallCap: number; hunterMonthlyCap: number; sendsGlobalPerDay: number };
   sendsOnlyTo?: string;
+  allowance?: { runsLeftToday: number; runsDailyCap: number; runsLeftThisHourForYou: number; runsHourlyCap: number; companiesLeftToday: number; dailyResetsAtUtc: string; hourlyResetsAtUtc: string };
 };
 type Candidate = { domain: string; name: string; why: string };
 
@@ -371,6 +372,7 @@ export default function Home() {
         /* ignore */
       }
       setCompanies(r.companies);
+      api<Health>("/api/health").then(setHealth).catch(() => undefined);
       const queue = [...r.companies];
       const worker = async () => {
         while (queue.length && !stop.current) {
@@ -451,6 +453,11 @@ export default function Home() {
           <>
             <span className={`chip ${health.contactLookup ? "ok" : "warn"}`}>Contact lookup {health.contactLookup ? "on" : "off: add contacts by hand"}</span>
             <span className={`chip ${health.sendReady ? "ok" : "warn"}`}>Preview email {health.sendReady ? "on: goes only to the owner’s inbox" : "not connected yet: drafts are shown, nothing is sent"}</span>
+            {!health.owner && health.allowance && (
+              <span className={`chip ${health.allowance.runsLeftToday > 0 && health.allowance.runsLeftThisHourForYou > 0 ? "" : "warn"}`}>
+                Public demo allowance: {health.allowance.runsLeftToday} of {health.allowance.runsDailyCap} runs left today (resets 00:00 UTC, 05:30 IST) · {health.allowance.runsLeftThisHourForYou} of {health.allowance.runsHourlyCap} left for you this hour
+              </span>
+            )}
             {health.owner && (
               <>
                 <span className={`chip ${health.gemini ? "ok" : "warn"}`}>Gemini {health.gemini ? "ready" : "not configured"}</span>
@@ -459,7 +466,7 @@ export default function Home() {
                 )}
                 {health.store && <span className={`chip ${health.store.durable ? "ok" : "warn"}`}>Storage: {health.store.kind}{health.store.durable ? " (durable)" : " (not durable)"}</span>}
                 {health.usageToday && health.caps && (
-                  <span className="chip">Today: {health.usageToday.runs}/{health.caps.runsGlobalPerDay} runs · {health.usageToday.geminiCalls}/{health.caps.geminiDailyCallCap} AI calls · {health.usageToday.sends}/{health.caps.sendsGlobalPerDay} sends · Hunter {health.usageToday.hunterThisMonth}/{health.caps.hunterMonthlyCap} this month</span>
+                  <span className="chip">Today: public {health.usageToday.runs}/{health.caps.runsGlobalPerDay} runs · owner {health.usageToday.ownerRuns ?? 0}/{health.caps.ownerRunsPerDay ?? 20} runs · {health.usageToday.geminiCalls}/{health.caps.geminiDailyCallCap} AI calls · {health.usageToday.sends}/{health.caps.sendsGlobalPerDay} sends · Hunter {health.usageToday.hunterThisMonth}/{health.caps.hunterMonthlyCap} this month</span>
                 )}
                 {health.gmailCanConnect && <span className="chip warn"><a href="/api/gmail/start">Connect Gmail</a></span>}
               </>

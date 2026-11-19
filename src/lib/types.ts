@@ -180,6 +180,8 @@ export interface RunRecord {
   note?: string;
   /** Created by the signed-in owner (private: readable only with the owner session). */
   owner?: boolean;
+  /** Audit flag: who started this run. */
+  startedBy?: "owner" | "visitor";
   /** Created by a public visitor. Only public runs are readable without the owner session, and only by their unguessable id. */
   public?: boolean;
 }
