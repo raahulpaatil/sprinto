@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
+import { isOwner, signValue } from "@/lib/access";
 import { gmailClientConfigured, OWNER_EMAIL } from "@/lib/gmail";
 import { COOKIE, GMAIL_SCOPE, htmlPage, redirectUri } from "@/lib/gmail-oauth";
 import { clientIp } from "@/lib/limits";
@@ -7,8 +8,9 @@ import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-/** Redirects to Google's consent screen (gmail.send only, offline access). */
+/** Owner only. Redirects to Google's consent screen (gmail.send only, offline access) and issues a signed state cookie. */
 export async function GET(req: Request) {
+  if (!isOwner(req)) return htmlPage("Owner sign-in required", "Connecting Gmail is owner-only. Sign in at /owner first.", 401, false);
   if (process.env.GMAIL_REFRESH_TOKEN?.trim()) {
     return htmlPage("Gmail already configured", "A refresh token is set in the server environment, so the connect flow is skipped.");
   }
@@ -38,6 +40,6 @@ export async function GET(req: Request) {
     code_challenge_method: "S256",
   }).toString();
   const res = NextResponse.redirect(url.toString(), 302);
-  res.cookies.set(COOKIE, `${state}.${verifier}`, { httpOnly: true, secure: true, sameSite: "lax", path: "/api/gmail", maxAge: 600 });
+  res.cookies.set(COOKIE, signValue(`${state}~${verifier}`), { httpOnly: true, secure: true, sameSite: "lax", path: "/api/gmail", maxAge: 600 });
   return res;
 }

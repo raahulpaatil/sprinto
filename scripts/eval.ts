@@ -12,6 +12,7 @@ import type { CompanyRecord } from "../src/lib/types";
 import { allowAttempt, allowDiscover, allowRun, limits } from "../src/lib/limits";
 import { discoverDomains } from "../src/lib/discover";
 import { open as unseal, seal } from "../src/lib/secrets";
+import { checkOwnerKey, isOwner, issueOwnerCookie, OWNER_COOKIE, ownerOnly, signValue, verifySigned } from "../src/lib/access";
 import { gmailStatus, resolveRefreshToken, storeRefreshToken } from "../src/lib/gmail";
 
 // ---------- tiny test framework ----------
@@ -80,6 +81,7 @@ interface Scenario {
   contacts?: ContactFinder;
   draft?: (attempt: number, prompt: string) => unknown;
   mailer?: ReturnType<typeof mailerFake>;
+  visitor?: boolean;
 }
 
 async function run(sc: Scenario) {
@@ -99,6 +101,7 @@ async function run(sc: Scenario) {
   const mailer = sc.mailer ?? mailerFake();
   const deps: Deps = { fetcher: w.fetcher, llm, contacts, mailer, store, now: () => new Date() };
   const c = newCompany("run-1", `co-${sc.domain}`, sc.domain, true, new Date(), sc.expectedName);
+  c.owner = !sc.visitor;
   await processCompany(c, deps);
   return { c, deps, counts, mailer, fetchCalls: w.calls, store };
 }
@@ -477,6 +480,35 @@ async function main() {
     for (const [k, v] of [["GMAIL_CLIENT_ID", saved.id], ["GMAIL_CLIENT_SECRET", saved.sec], ["GMAIL_REFRESH_TOKEN", saved.rt]] as const) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
+  }
+
+  // 16. owner gate
+  current = "16 owner gate";
+  {
+    const saved = process.env.OWNER_KEY;
+    const req = (cookie?: string) => new Request("https://x.test/api", { headers: cookie ? { cookie } : {} });
+    delete process.env.OWNER_KEY;
+    check("no OWNER_KEY configured: nobody is owner (fails closed)", !isOwner(req()) && !checkOwnerKey("anything") && issueOwnerCookie() === null && ownerOnly(req())?.status === 401, "", true);
+    process.env.OWNER_KEY = "test-owner-key-1234567890";
+    check("short key is rejected as misconfiguration", (() => { process.env.OWNER_KEY = "short"; const r = !checkOwnerKey("short"); process.env.OWNER_KEY = "test-owner-key-1234567890"; return r; })());
+    check("wrong key rejected, right key accepted", !checkOwnerKey("nope") && !checkOwnerKey("") && checkOwnerKey("test-owner-key-1234567890"));
+    const c = issueOwnerCookie()!;
+    check("valid session cookie is owner", isOwner(req(`${OWNER_COOKIE}=${c.value}`)) && ownerOnly(req(`${OWNER_COOKIE}=${c.value}`)) === null, "", true);
+    check("no cookie / visitor gets 401", ownerOnly(req())?.status === 401, "", true);
+    const [exp, sig] = c.value.split(".");
+    check("tampered signature rejected", !isOwner(req(`${OWNER_COOKIE}=${exp}.${sig.slice(0, -2)}xx`)), "", true);
+    check("forged longer expiry rejected", !isOwner(req(`${OWNER_COOKIE}=${Number(exp) + 99999}.${sig}`)), "", true);
+    const old = issueOwnerCookie(Date.now() - 13 * 3600 * 1000)!;
+    check("expired session rejected", !isOwner(req(`${OWNER_COOKIE}=${old.value}`)));
+    process.env.OWNER_KEY = "a-different-owner-key-0987654321";
+    check("session signed with another key rejected", !isOwner(req(`${OWNER_COOKIE}=${c.value}`)), "", true);
+    process.env.OWNER_KEY = "test-owner-key-1234567890";
+    const st = signValue("state~verifier");
+    check("signed OAuth state verifies", verifySigned(st) === "state~verifier");
+    check("forged OAuth state rejected", verifySigned("evil~verifier." + st.split(".").pop()) === null && verifySigned("state~verifier.AAAA") === null, "", true);
+    const v = await run({ domain: "acmecloud.test", pages: acmePages, extract: acmeExtract, contacts: usePriya, draft: goodDraft, visitor: true });
+    check("a non-owner company never sends even with sending enabled", v.mailer.deliveries.length === 0 && v.c.send?.status === "not_attempted", v.c.send?.status ?? "", true);
+    if (saved === undefined) delete process.env.OWNER_KEY; else process.env.OWNER_KEY = saved;
   }
 
   // utilities

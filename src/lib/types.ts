@@ -149,6 +149,8 @@ export interface CompanyRecord {
   /** Contact the user typed in up front; used only when Hunter finds nobody. */
   hintContact?: { name: string; role: string };
   sendEnabled: boolean;
+  /** Set server-side from the owner session at creation. Only owner companies can send or use unlimited Hunter lookups. */
+  owner?: boolean;
   status: CompanyStatus;
   stage: string;
   pages: PageRecord[];
@@ -174,4 +176,6 @@ export interface RunRecord {
   companyIds: string[];
   createdAt: string;
   note?: string;
+  /** Always the authenticated owner: visitors cannot create runs. */
+  owner?: boolean;
 }

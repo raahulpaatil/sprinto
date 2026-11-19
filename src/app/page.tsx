@@ -1,9 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { SAMPLE } from "@/lib/sample";
 import type { CompanyRecord, Fact } from "@/lib/types";
 
 type Health = {
+  owner: boolean;
+  ownerConfigured?: boolean;
   gemini: boolean;
   hunter: boolean;
   gmail: boolean;
@@ -266,13 +269,18 @@ export default function Home() {
   const patch = useCallback((c: CompanyRecord) => setCompanies((prev) => prev.map((x) => (x.id === c.id ? c : x))), []);
 
   useEffect(() => {
-    api<Health>("/api/health").then(setHealth).catch(() => setHealth(null));
-    try {
-      const last = localStorage.getItem(LS_RUN);
-      if (last) api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`).then((r) => setCompanies(r.companies)).catch(() => undefined);
-    } catch {
-      /* storage may be blocked */
-    }
+    api<Health>("/api/health")
+      .then((h) => {
+        setHealth(h);
+        if (!h.owner) return;
+        try {
+          const last = localStorage.getItem(LS_RUN);
+          if (last) api<{ companies: CompanyRecord[] }>(`/api/runs/${last}`).then((r) => setCompanies(r.companies)).catch(() => undefined);
+        } catch {
+          /* storage may be blocked */
+        }
+      })
+      .catch(() => setHealth(null));
   }, []);
 
   async function processOne(c: CompanyRecord) {
@@ -358,9 +366,49 @@ export default function Home() {
     return m;
   }, {});
 
+  if (health && !health.owner) {
+    return (
+      <main className="wrap">
+        <h1>Sprinto</h1>
+        <p className="sub">
+          Cold-outreach research assistant for Sprinto’s Growth Lead. For each company domain it scrapes the site, extracts facts with cited evidence, qualifies the
+          company against the ICP, finds a contact, drafts a grounded first email and sends a preview only to the owner’s own inbox. Nothing is ever sent to a prospect.
+        </p>
+        <div className="card">
+          <h2>Live runs are owner-only</h2>
+          <p className="hint" style={{ margin: 0 }}>
+            Research, discovery, contact lookup, drafting, sending and stored results use paid and private services, so they require the owner’s sign-in. This public page shows
+            static sample output only and makes no live calls. <a href="/owner">Owner sign-in</a>
+          </p>
+        </div>
+        <h2>How a company is decided</h2>
+        <ul className="ul">
+          <li>B2B SaaS is required. Series A-C is a hard filter, named on the site and always labelled a proxy, not proof. 50-200 employees is a soft band that is flagged but never disqualifies.</li>
+          <li>Already holding SOC 2, ISO 27001 or GDPR disqualifies, shown with the exact quote. Thin or conflicting evidence goes to manual review with the reason.</li>
+          <li>Every fact needs a verbatim quote from a fetched page. Unverifiable claims are dropped, and anything uncertain is shown as uncertain.</li>
+          <li>A first email needs a hook tied to a quote that is verified on a fetched page, and it can only ever be previewed to the owner’s own inbox.</li>
+        </ul>
+        <h2>Sample output <span className="conf proxy">static example, not live data</span></h2>
+        <Company c={SAMPLE} onContact={() => undefined} onResend={() => undefined} busy={false} />
+        <p className="foot">Built for Mesa Term 2 AI Case 2. The sample above is a frozen example from public website text.</p>
+      </main>
+    );
+  }
+  if (!health) {
+    return (
+      <main className="wrap">
+        <h1>Sprinto</h1>
+        <p className="sub">Loading…</p>
+      </main>
+    );
+  }
+
   return (
     <main className="wrap">
-      <h1>Sprinto</h1>
+      <div className="co-head">
+        <h1>Sprinto</h1>
+        <span className="hint">Owner mode · <button className="secondary" onClick={async () => { await fetch("/api/owner/logout", { method: "POST" }); window.location.reload(); }}>Sign out</button></span>
+      </div>
       <p className="sub">
         Cold-outreach research assistant for Sprinto’s Growth Lead. Paste company domains (or discover them from the ICP). For each one it scrapes the site,
         extracts facts with cited evidence, qualifies against the ICP, finds a contact, drafts a grounded first email and sends a preview <b>only to the owner’s own inbox</b>.

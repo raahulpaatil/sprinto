@@ -262,6 +262,7 @@ export async function draftAndSend(c: CompanyRecord, deps: Deps) {
 
 export async function trySend(c: CompanyRecord, deps: Deps, to: string = OWNER_EMAIL): Promise<SendResult> {
   const at = deps.now().toISOString();
+  if (!c.owner) return { status: "not_attempted", note: "Sending is owner-only; nothing was emailed.", at };
   if (!c.sendEnabled) return { status: "not_attempted", note: "Sending to your inbox was turned off for this run.", at };
   if (!c.draft || !c.contact) return { status: "not_attempted", note: "No draft yet.", at };
   if (c.draft.status !== "ready") {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
+import { ownerOnly } from "@/lib/access";
 import { normalizeDomain } from "@/lib/fetcher";
 import { allowRun, clientIp, MAX_DOMAINS_PER_RUN } from "@/lib/limits";
 import { newCompany, liveDeps, stripPageText } from "@/lib/pipeline";
@@ -17,17 +18,15 @@ function parseLines(input: unknown): { domain: string; name?: string; contactNam
     const domain = normalizeDomain(d ?? "");
     if (!domain || seen.has(domain)) continue;
     seen.add(domain);
-    out.push({
-      domain,
-      name: n?.trim().slice(0, 80) || undefined,
-      contactName: cn?.trim().slice(0, 80) || undefined,
-      contactRole: cr?.trim().slice(0, 100) || undefined,
-    });
+    out.push({ domain, name: n?.trim().slice(0, 80) || undefined, contactName: cn?.trim().slice(0, 80) || undefined, contactRole: cr?.trim().slice(0, 100) || undefined });
   }
   return out;
 }
 
+/** Owner only. Visitors cannot start live runs at all; the rate limits below complement that gate. */
 export async function POST(req: Request) {
+  const denied = ownerOnly(req);
+  if (denied) return denied;
   const deps = liveDeps();
   let body: { domains?: unknown; send?: unknown; mode?: unknown };
   try {
@@ -45,14 +44,12 @@ export async function POST(req: Request) {
 
   const now = deps.now();
   const sendEnabled = body.send !== false;
-  const run: RunRecord = {
-    id: randomUUID(),
-    mode: body.mode === "discover" ? "discover" : "paste",
-    sendEnabled,
-    companyIds: [],
-    createdAt: now.toISOString(),
-  };
-  const companies = parsed.map((p, i) => newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name, p.contactName && p.contactRole ? { name: p.contactName, role: p.contactRole } : undefined));
+  const run: RunRecord = { id: randomUUID(), mode: body.mode === "discover" ? "discover" : "paste", sendEnabled, companyIds: [], createdAt: now.toISOString(), owner: true };
+  const companies = parsed.map((p, i) => {
+    const c = newCompany(run.id, randomUUID(), p.domain, sendEnabled, new Date(now.getTime() + i), p.name, p.contactName && p.contactRole ? { name: p.contactName, role: p.contactRole } : undefined);
+    c.owner = true;
+    return c;
+  });
   run.companyIds = companies.map((c) => c.id);
   await deps.store.saveRun(run);
   for (const c of companies) await deps.store.saveCompany(c);

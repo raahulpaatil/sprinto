@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
+import { ownerOnly } from "@/lib/access";
 import { allowAttempt, limits } from "@/lib/limits";
 import { liveDeps, processCompany, stripPageText } from "@/lib/pipeline";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-/** Only companies created by POST /api/runs (which is rate limited) can be processed. */
-export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+/** Owner only, and only for companies created by POST /api/runs. */
+export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const denied = ownerOnly(req);
+  if (denied) return denied;
   const { id } = await ctx.params;
   const deps = liveDeps();
   const c = await deps.store.getCompany(id);

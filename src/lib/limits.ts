@@ -77,3 +77,9 @@ export function allowDiscover(store: Store, ip: string, now = new Date()) {
 export async function allowAttempt(store: Store, kind: string, id: string, max: number): Promise<boolean> {
   return (await store.hit(`attempt:${kind}:${id}`, 1)) <= max;
 }
+
+/** Failed owner-key attempts: 8 per hour per IP. */
+export async function allowOwnerLogin(store: Store, ip: string, now = new Date()): Promise<Gate> {
+  const n = await store.hit(`ownerlogin:h:${hourKey(now)}:${ip}`, 1);
+  return n > 8 ? { ok: false, retryAfterSec: secondsToNextHour(now), reason: "Too many attempts. Try again later." } : { ok: true };
+}

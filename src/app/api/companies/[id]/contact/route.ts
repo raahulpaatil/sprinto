@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ownerOnly } from "@/lib/access";
 import { allowAttempt, limits } from "@/lib/limits";
 import { continueWithContact, liveDeps, stripPageText } from "@/lib/pipeline";
 
@@ -7,6 +8,8 @@ export const maxDuration = 300;
 
 /** Lets the user supply a real contact when Hunter has no key or no match. The contact is never emailed. */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const denied = ownerOnly(req);
+  if (denied) return denied;
   const { id } = await ctx.params;
   const deps = liveDeps();
   const c = await deps.store.getCompany(id);

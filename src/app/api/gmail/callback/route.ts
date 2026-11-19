@@ -1,14 +1,11 @@
 import { timingSafeEqual } from "node:crypto";
+import { cookieValue, isOwner, verifySigned } from "@/lib/access";
 import { gmailClientConfigured, storeRefreshToken } from "@/lib/gmail";
 import { COOKIE, GMAIL_SCOPE, htmlPage, redirectUri } from "@/lib/gmail-oauth";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-function cookieValue(req: Request, name: string): string | null {
-  const m = (req.headers.get("cookie") ?? "").split(/;\s*/).find((c) => c.startsWith(`${name}=`));
-  return m ? decodeURIComponent(m.slice(name.length + 1)) : null;
-}
 const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 /** Exchanges the authorization code for tokens and stores the refresh token (encrypted) server-side. Never displays it. */
@@ -17,15 +14,17 @@ export async function GET(req: Request) {
     r.headers.append("set-cookie", `${COOKIE}=; Path=/api/gmail; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
     return r;
   };
+  if (!isOwner(req)) return clear(htmlPage("Owner sign-in required", "This link only completes for the signed-in owner. Nothing was changed.", 401, false));
   if (!gmailClientConfigured()) return htmlPage("Gmail not set up", "GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET are not set on the server.", 503, false);
   const q = new URL(req.url).searchParams;
   const err = q.get("error");
   if (err) return clear(htmlPage("Gmail not connected", `Google reported: ${err.replace(/[^a-z_ -]/gi, "").slice(0, 60)}. Nothing was changed.`, 400, false));
   const cookie = cookieValue(req, COOKIE);
-  const [state, verifier] = (cookie ?? "").split(".");
+  const raw = cookie ? verifySigned(cookie) : null; // only a start issued to the owner produces a valid signed cookie
+  const [state, verifier] = (raw ?? "").split("~");
   const code = q.get("code");
   const gotState = q.get("state");
-  if (!cookie || !state || !verifier || !code || !gotState || !same(state, gotState)) {
+  if (!raw || !state || !verifier || !code || !gotState || !same(state, gotState)) {
     return clear(htmlPage("Gmail not connected", "The sign-in session expired or did not match. Start again from /api/gmail/start.", 400, false));
   }
   let j: { refresh_token?: string; scope?: string; error?: string };
